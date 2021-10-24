@@ -1,9 +1,7 @@
 add_library(Epsilon MODULE
     # List your source files here.
     #MPAll.cpp
-    ReMP.cpp
     MPAvailable.cpp
-    SizeofTypes.cpp
     util.cpp
 )
 

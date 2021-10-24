@@ -148,6 +148,12 @@ getAddressSpaceMask(bool overflowbit) {
   return Mask;
 }
 
+Instruction *getInsertPointBefore(Instruction* I) {
+  errs() <<" Return Test\n";
+  if(BasicBlock::iterator(I) == I->getParent()->begin()) return nullptr;
+  errs() <<" Return Test not null\n";
+  return &*std::prev(BasicBlock::iterator(I));
+}
 Instruction *getInsertPointAfter(Instruction *I) {
   if (InvokeInst *Invoke = dyn_cast<InvokeInst>(I)) {
     BasicBlock *Dst = Invoke->getNormalDest();
@@ -171,7 +177,6 @@ Instruction *getInsertPointAfter(Instruction *I) {
   if (isa<PHINode>(I))
     return &*I->getParent()->getFirstInsertionPt();
 
-  assert(!isa<TerminatorInst>(I));
   return &*std::next(BasicBlock::iterator(I));
 }
 
@@ -360,31 +365,20 @@ void collectPHIOrigins(PHINode *PN, std::vector<Value *> &Origins) {
 }
 
 
-Value* createXmmTag(IRBuilder<>& irb, Value* size, std::string prefix){
-  //이 메소드는 태그만 만듬 
-  //리턴후에 원래의 offet과 and 해야됨 
-  //gep 전용
-  //size는 128bit
-  Value* tagVal;
-  Value* UnderOffset = irb.CreateShl(size, 32, prefix+".under");
-  
-  tagVal = irb.CreateOr(UnderOffset, size, prefix + ".tag");
-  tagVal->mutateType(Type::getInt128Ty(irb.getContext()));
-  Value* tag128Val = irb.CreateShl(tagVal, 64, ".XMM.TAG");
-  Value* sizeAnd = irb.CreateAnd(size, 0x0000ffffffffffff, "size");
-  Value* resultOffset = irb.CreateOr(tagVal, sizeAnd, prefix+".offset");
-  return resultOffset;
-}
 
-Value* createMask(IRBuilder<>& irb, Value* size){
-  //초기화 전용
-  ConstantInt* one = ConstantInt::get(Type::getInt64Ty(irb.getContext()), (1ULL << 7)-1);
+
+Value* createMask(IRBuilder<>& irb, Value* size, LLVMContext& ctx){
+  // 초기화 전용
+  // 이거 고쳐야됨
+  // 
+  // 이거 반대로 하고 있음
+  // 반대로 하는거만 고치면됨
+  // 그리고 생각해보니 처음에 초기화할 때는 
+  // underflow를 보기위한 태그는 0으로 놔도 됨
+  ConstantInt* one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31));
   Value* maskNoShift = irb.CreateSub(one, size, "sub");
-  ConstantInt* clearOver = ConstantInt::get(Type::getInt64Ty(irb.getContext()), 0x00FF);
-  Value* temp = irb.CreateAnd(maskNoShift, clearOver, ".over.mask");
-  Value* maskUnderShift = irb.CreateShl(size, 32, "under.shift");
-  Value* maskShift = irb.CreateOr(temp, maskUnderShift, ".MASK");
-  return maskShift;
+  valuePrint(maskNoShift, "mask");
+  return maskNoShift;
 }
 
 Value* getClearTagPointer(IRBuilder<>& irb, Value* MAllocP, std::string prefix){
@@ -412,8 +406,17 @@ void instPrint(Instruction* inst, std::string prefix){
   errs() <<"\n";
 }
 void typePrint(Type* type, std::string prefix){
-  if(!type) return;
+  assert(type);
+  
   errs() <<prefix<<": ";
   type->print(errs());
   errs() <<"\n";
+}
+
+bool isI128TypeEqual(Type* type){
+  typePrint(type, "Type: ");
+  if (type->isIntegerTy() ){
+    if(type->getIntegerBitWidth() == 128) return true;
+  }
+  return false;
 }

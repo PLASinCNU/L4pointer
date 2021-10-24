@@ -39,12 +39,13 @@ bool isAllocationFunc(Function *F);
 bool isFreeFunc(Function *F);
 bool isAllocation(Instruction *I);
 bool isStackValue(Instruction* I);
-Value* createXmmTag(IRBuilder<>& irb, Value* size, std::string prefix="");
-Value* createMask(IRBuilder<>& irb, Value* size);
+Value* createMask(IRBuilder<>& irb, Value* size, LLVMContext& ctx);
 Value* getClearTagPointer(IRBuilder<>& irb, Value* MAllocP, std::string prefix="");
 void valuePrint(Value* value, std::string prefix);
 void typePrint(Type* type, std::string prefix);
 void instPrint(Instruction* inst, std::string prefix);
+
+bool isI128TypeEqual(Type* type1);
 
 enum LibPtr {
     None,
@@ -70,6 +71,7 @@ inline Value* otherOperand(Instruction *I, Value *Op) {
 }
 
 unsigned long long getAddressSpaceMask(bool overflowbit = false);
+Instruction *getInsertPointBefore(Instruction* I);
 Instruction *getInsertPointAfter(Instruction *I);
 AllocationType getCallType(Instruction* I);
 
