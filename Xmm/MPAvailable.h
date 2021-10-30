@@ -23,7 +23,6 @@
 
 using namespace llvm;
 
-static void setSafeName(Value* V);
 
 class MPAvailable : public ModulePass {
   // to avoid tagging
@@ -85,7 +84,10 @@ class MPAvailable : public ModulePass {
                       std::map<StringRef, int>& argToArg,
                       std::map<Value*, Value*>& valToVal);
 
-  void replaceStructTy(Module& M ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep 쪼개기
+  // void replaceStructTy(Module& M ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep 쪼개기
+  // void replaceStructTyInFunction(Function& F ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep 쪼개기
+
+
   void replaceFunction(Function* newFunc, Function* oldFunc);
   void eraseFunction(Function* function);
   void eraseRemoveInstruction();

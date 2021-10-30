@@ -76,15 +76,18 @@ void MPAvailable::createXmmStructTy(Module& M) {
   ArrayRef<Type*> xmm_element_types(
       {Type::getInt64Ty(M.getContext()), Type::getInt64Ty(M.getContext())});
   XMM = FixedVectorType::get(Type::getInt64Ty(M.getContext()), 2);
-  
-  for(StructType* st :M.getIdentifiedStructTypes()){
+
+  for (StructType* st : M.getIdentifiedStructTypes()) {
     std::vector<Type*> plist;
-    for(Type* type : st->elements()){
-      if(type->isPointerTy()){
+    for (Type* type : st->elements()) {
+      if (type->isPointerTy()) {
         plist.push_back(XMM);
-      } else plist.push_back(type);
+      } else
+        plist.push_back(type);
     }
-    StructType* newStructTy = StructType::create(plist);
+    StructType* newStructTy =
+        StructType::create(plist, st->getName().str() + ".new.struct");
+    typePrint(newStructTy, "new struct");
     strucTyToStructTy[st] = newStructTy;
   }
 }
@@ -142,6 +145,7 @@ bool MPAvailable::runOnModule(Module& M) {
   DenseMap<Value*, const SCEV*> PointerBounds;
 
   createXmmStructTy(M);
+  // replaceStructTy(M);
   // preprocessModule(M);
   for (auto& F : M) {
     if (!F.hasName()) {
@@ -172,7 +176,7 @@ bool MPAvailable::runOnModule(Module& M) {
   while (!workList.empty()) {
     Function* F = workList.front();
     if (F->users().empty()) {
-      errs() <<F->getName() << " is being deleted ...";
+      errs() << F->getName() << " is being deleted ...";
       workList.erase(workList.begin());
       F->eraseFromParent();
     } else {
@@ -193,34 +197,6 @@ void MPAvailable::analyzeGEPforFunction(Function& F) {
       splatGEP(&*vI);
   }
 }
-
-static void setSafeName(Value* V) {
-  // Void values can not have a name
-  if (V->getType()->isVoidTy()) return;
-
-  // Don't corrupt externally visable symbols
-  GlobalValue* GV = dyn_cast<GlobalValue>(V);
-  if (GV && GV->isDeclarationForLinker()) return;
-
-  // Don't name values that are not globals or instructions
-  if (!GV && !isa<Instruction>(V)) return;
-
-  // Add name to anonymous instructions
-  if (!V->hasName()) {
-    V->setName("safe.anon");
-    return;
-  }
-
-  // Don't corrupt llvm.* names
-  if (V->getName().startswith("llvm.")) return;
-
-  // Don't rename twice
-  if (V->getName().startswith("safe.")) return;
-
-  // Default: prefix name with "safe."
-  V->setName(Twine("safe.") + V->getName());
-}
-
 void MPAvailable::allocation(Module& M) {
   for (Function& F : M) {
     allocOnFunction(F);
@@ -951,21 +927,20 @@ Value* MPAvailable::ununTag(Value* xmmPtr, Type* origType, IRBuilder<>& irb,
   APInt oneAPInt(64, 1);
   ConstantInt::get(irb.getInt64Ty(), 1);
   Constant* one = ConstantInt::get(irb.getInt64Ty(), 1);
-  valuePrint(one, "one : ");
+
   Value* lowerSignal = irb.CreateShl(one, 63);
   Value* upperSignal = irb.CreateShl(one, 31);
-  valuePrint(upperSignal, "upperSignal");
+
   Value* signal = irb.CreateOr(lowerSignal, upperSignal);
-  valuePrint(signal, "signal");
+
   Value* tag =
       irb.CreateExtractElement(xmmPtr, (uint64_t)0, prefix + ".tag.extract");
-  valuePrint(tag, "tag");
+
   Value* pointer = irb.CreateExtractElement(xmmPtr, 1, prefix + ".ptr");
 
-  typePrint(signal->getType(), "Signal");
   Value* removeTag = irb.CreateAnd(signal, tag);
   Constant* cons = dyn_cast<Constant>(removeTag);
-  valuePrint(cons, "cons");
+
   Value* lower = irb.CreateAnd(removeTag, lowerSignal);
   Value* upper = irb.CreateShl(removeTag, 32);
   Value* resultTag = irb.CreateOr(lower, upper);
@@ -978,7 +953,6 @@ Value* MPAvailable::ununTag(Value* xmmPtr, Type* origType, IRBuilder<>& irb,
   Value* ptr = irb.CreateIntToPtr(
       resultPtr, Type::getInt8PtrTy(irb.getContext()), prefix + "_ptr");
 
-  typePrint(origType, "origType");
   Value* res = irb.CreateBitCast(ptr, origType, prefix + ".unwrap");
   return res;
 }
@@ -1059,6 +1033,7 @@ void MPAvailable::preprocessModule(Module& M) {
   }
 }
 bool MPAvailable::isXMMTy(Type* type) {
+  // XMM Type 인지, XMMTYPE의 포인터는 FALSE
   if (type->isVectorTy()) {
     VectorType* vt = dyn_cast<VectorType>(type);
     return vt->getElementType()->isIntegerTy(64);
@@ -1365,6 +1340,7 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
     // Reset the insert point of IRB
     switch (I.getOpcode()) {
       case Instruction::Alloca: {
+        // PASS
         AllocaInst* allocaInst = dyn_cast<AllocaInst>(&I);
         if (allocaInst->getAllocatedType()->isPointerTy()) {
           Value* replace = irb.CreateAlloca(XMM, nullptr, I.getName());
@@ -1373,9 +1349,20 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
           // newAI->setAllocatedType(XMM);
           // newAI->setAlignment(Align(16));
           valToVal[dyn_cast<Value>(&I)] = replace;
-          valuePrint(replace, "alloca: ");
 
           // newInst->eraseFromParent();
+        } else if (allocaInst->getAllocatedType()->isStructTy()) {
+          StructType* allocaSt =
+              dyn_cast<StructType>(allocaInst->getAllocatedType());
+
+          if (strucTyToStructTy.count(allocaSt) > 0) {
+            StructType* newType = strucTyToStructTy[allocaSt];
+            IRBuilder<> irb(&I);
+            Value* newVal =
+                irb.CreateAlloca(newType->getPointerTo(), nullptr,
+                                 allocaInst->getName() + ".xmm.struct");
+            valToVal[dyn_cast<Value>(&I)] = newVal;
+          }
         } else {
           Instruction* newInst = I.clone();
           valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
@@ -1392,6 +1379,7 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
         if (argToArg.count(v0->getName())) {
           // Argument를 저장하는 과정
+          // Argument 저장 통과
           AllocaInst* newAI = dyn_cast<AllocaInst>(I.getOperand(1));
           int index = argToArg[v0->getName()];
           if (newAI->getAllocatedType()->isPointerTy()) {
@@ -1413,10 +1401,7 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               val = valToVal[v0];
             else
               val = v0;
-            
 
-            valuePrint(v1, "pointer");
-            valuePrint(val, "val");
             irb.CreateStore(val, v1);
           }
           break;
@@ -1426,32 +1411,48 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
         if (valToVal.count(pointer) > 0) {
           Value* newPointer = valToVal[pointer];
           Value* newValue;
+
           if (valToVal.count(value) > 0)
             newValue = valToVal[value];
           else
             newValue = value;  // value is Constant
 
           if (isXMMTy(newPointer->getType())) {
+            // 통과
             Value* clearTagPointer =
                 ununTag(newPointer, pointer->getType(), irb,
                         newPointer->hasName() ? newPointer->getName().str()
                                               : ".clear.tag");
             irb.CreateStore(newValue, clearTagPointer);
           } else {
-            if (isXMMTy(newValue->getType())) {
-              irb.CreateStore(newValue, newPointer);
+            // Pointer 가 XMM TYPE 이 아님 근데 왜 코드가 이러지?
+
+            if (isXMMTy(newPointer->getType()->getPointerElementType())) {
+              // 포인터의 element type이 XMM type임
+              if (isXMMTy(newValue->getType())) {
+                irb.CreateStore(newValue, newPointer);
+              } else {
+                Value* castVal = newValue;
+                if (!newValue->getType()->isIntegerTy()) {
+                  castVal = irb.CreatePtrToInt(newValue, irb.getInt64Ty());
+                }
+                Constant* nullVec = Constant::getNullValue(XMM);
+                Constant* nullValue = Constant::getNullValue(
+                    Type::getInt64Ty(clone->getContext()));
+                Value* vec1 =
+                    irb.CreateInsertElement(nullVec, nullValue, uint64_t(0));
+                Value* vec2 =
+                    irb.CreateInsertElement(vec1, nullValue, uint64_t(1));
+                irb.CreateStore(vec2, newPointer);
+              }
             } else {
-              Constant* nullVec = Constant::getNullValue(XMM);
-              Constant* nullValue =
-                  Constant::getNullValue(Type::getInt64Ty(clone->getContext()));
-              Value* vec1 =
-                  irb.CreateInsertElement(nullVec, nullValue, uint64_t(0));
-              Value* vec2 =
-                  irb.CreateInsertElement(vec1, nullValue, uint64_t(1));
-              irb.CreateStore(vec2, newPointer);
+              irb.CreateStore(newValue, newPointer);
             }
           }
         } else {
+          // Pointer 가 절대 XMM Type이 되지도 않고
+          // 여기로 오면 문제 있는 코드 매칭되는 포인터가 없음 지워도 되는 코드
+          // 지우면 안됨 글로벌 변수에 대해서도 혹시 모르니까 생각하자
           // value is constant
           Value* newPointer = valToVal[pointer];
           if (isXMMTy(newPointer->getType())) {
@@ -1478,14 +1479,11 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
         break;
       }
       case Instruction::Load: {
+        // Load 는 오히려 심플
         Value* origPointer = I.getOperand(0);
         if (valToVal.count(origPointer) > 0) {
           Value* pointer = valToVal[origPointer];
-          if (isa<AllocaInst>(origPointer)) {
-            Value* newLoad = irb.CreateLoad(pointer);
-            valToVal[dyn_cast<Value>(&I)] = newLoad;
-            AllocaInst* alloca = dyn_cast<AllocaInst>(origPointer);
-          } else if (isXMMTy(pointer->getType())) {
+          if (isXMMTy(pointer->getType())) {
             Type* type = valueToType[origPointer];
             Value* clearTagPointer = ununTag(
                 pointer, origPointer->getType(), irb,
@@ -1495,94 +1493,182 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
                                      ? origPointer->getName().str()
                                      : "unwrap_pointer");
             valToVal[dyn_cast<Value>(&I)] = replaceInst;
+          } else {
+            Value* newLoad = irb.CreateLoad(pointer);
+            valToVal[dyn_cast<Value>(&I)] = newLoad;
           }
         }
         break;
       }
       case Instruction::GetElementPtr: {
+        // 구조체, 배열, 포인터에 대해서 모두 생각해야 함
+        // PASS
         GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(&I);
-        Value* base = gep->getPointerOperand()->stripPointerCasts();
+        Value* base = gep->getPointerOperand();
+        Value* realBase = gep->getPointerOperand();
 
         if (valToVal.count(base) > 0) {
           Value* newBase = valToVal[base];
-          if (!isXMMTy(newBase->getType())) break;
-          Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
-          Value* ConstOffset = nullptr;
-          bool isPositive = hasNegativeOffset(gep);
+          if (base->getType()->getPointerElementType()->isStructTy()) {
+            //구조체일 때
+            if (gep->getType() != base->getType()) {
+              // load 까지 해놔야 함
+              // 왜냐? gep struct 면 return 이 멤버임
+              // 그럼 load 한 상태에서 gep를 만들면 되겠네?
+              // 우와 나 천재냐?
+              //
+              StructType* newSt =
+                  dyn_cast<StructType>(strucTyToStructTy[dyn_cast<StructType>(
+                      base->getType()->getPointerElementType())]);
 
-          Constant* nullVec = Constant::getNullValue(XMM);
-          Value* tag = createOffsetMask(irb, offset);
-          Value* v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
-          Value* v1 = irb.CreateInsertElement(v0, offset, 1);
+              Value* newGepBase =
+                  ununTag(newBase, newSt->getPointerTo(), irb, "unwrap.struct");
 
-          Value* replaceInst = irb.CreateAdd(
-              newBase, v1,
-              gep->hasName() ? gep->getName() : newBase->getName() + ".idx");
-          valToVal[dyn_cast<Value>(gep)] = replaceInst;
+              Value* newGEP;
+              if (gep->isInBounds()) {
+                std::vector<Value*> plist;
+
+                for (auto i = gep->idx_begin(); i != gep->idx_end(); i++) {
+                  Value* val = *i;
+                  Type* type = gep->getTypeAtIndex(
+                      cast<PointerType>(
+                          gep->getPointerOperand()->getType()->getScalarType())
+                          ->getElementType(),
+                      val);
+                  if (valToVal.count(val) > 0)
+                    plist.push_back(valToVal[val]);
+                  else
+                    plist.push_back(val);
+                }
+
+                newGEP = irb.CreateInBoundsGEP(newGepBase, plist);
+                valToVal[dyn_cast<Value>(gep)] = newGEP;
+
+              } else {
+                // 만약 같은 타입이라면 load할 필요가 없겠찌?
+              }
+            }
+          } else if (base->getType()->getPointerElementType()->isArrayTy()) {
+            if (gep->isInBounds()) {
+              std::vector<Value*> plist;
+              for (auto i = gep->idx_begin(); i != gep->idx_end(); i++) {
+                Value* val = *i;
+                Type* type = gep->getTypeAtIndex(
+                    cast<PointerType>(
+                        gep->getPointerOperand()->getType()->getScalarType())
+                        ->getElementType(),
+                    val);
+                if (valToVal.count(val) > 0)
+                  plist.push_back(valToVal[val]);
+                else
+                  plist.push_back(val);
+              }
+
+              Value* newGEP = irb.CreateInBoundsGEP(newBase, plist);
+              valToVal[dyn_cast<Value>(gep)] = newGEP;
+
+            } else {
+              // 만약 같은 타입이라면 load할 필요가 없겠찌?
+            }
+          } else if (isXMMTy(newBase->getType())) {
+            Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
+            Value* ConstOffset = nullptr;
+            bool isPositive = hasNegativeOffset(gep);
+
+            Constant* nullVec = Constant::getNullValue(XMM);
+            Value* tag = createOffsetMask(irb, offset);
+            Value* v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
+            Value* v1 = irb.CreateInsertElement(v0, offset, 1);
+
+            Value* replaceInst = irb.CreateAdd(
+                newBase, v1,
+                gep->hasName() ? gep->getName() : newBase->getName() + ".idx");
+            valToVal[dyn_cast<Value>(gep)] = replaceInst;
+          }
+          break;
+        } else {
+          // break 넣지 않고 default block에서 처리
         }
-        break;
       }
-
       case Instruction::Call: {
         CallInst* CI = dyn_cast<CallInst>(&I);
         Function* callee = CI->getCalledFunction();
 
-        if (callee) {
-          errs() << "callee Not null\n";
-        } else
-          errs() << "callee null\n";
-        instPrint(CI, "CI print");
         Instruction* cloneI;
         if (!callee) {
           // if callee is null, callee is declaration.
+          // 왜 인지 모르겠으나 declaration 함수가  null 인 경우가 있음
           cloneI = I.clone();
           clone->getInstList().push_back(cloneI);
           CI = dyn_cast<CallInst>(cloneI);
+          IRBuilder<> tempIRB(cloneI);
+
           for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
             Value* arg = CI->getArgOperand(i);
             if (valToVal.count(arg) > 0) {
               Value* newArg = valToVal[arg];
               if (isXMMTy(newArg->getType())) {
-                Value* newXMM = ununTag(newArg, arg->getType(), irb);
+                Value* newXMM = ununTag(newArg, arg->getType(), tempIRB);
                 CI->setArgOperand(i, newXMM);
-              } else CI->setArgOperand(i, newArg);
+              } else
+                CI->setArgOperand(i, newArg);
             }
           }
           valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(cloneI);
-        } 
+          break;
+        }
         if (callee->isDeclaration()) {
           // 포인터들 다 언랩핑하기
           // 여기서는 오퍼랜드만 교체하기
           cloneI = I.clone();
           clone->getInstList().push_back(cloneI);
+
           CI = dyn_cast<CallInst>(cloneI);
-          errs() << CI->getNumArgOperands() << " NuM ARG\n";
+          IRBuilder<> tempIRB(cloneI);
           for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
             Value* arg = CI->getArgOperand(i);
-            valuePrint(arg, "arg: ");
 
             if (valToVal.count(arg) > 0) {
               Value* newArg = valToVal[arg];
-              valuePrint(newArg, "new arg: ");
               if (isXMMTy(newArg->getType())) {
-                Value* newXMM = ununTag(newArg, arg->getType(), irb);
-                valuePrint(newXMM, "newXMM");
+                Value* newXMM = ununTag(newArg, arg->getType(), tempIRB);
                 CI->setArgOperand(i, newXMM);
-              } else CI->setArgOperand(i, newArg);
+              } else
+                CI->setArgOperand(i, newArg);
             }
           }
           valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(cloneI);
+          // malloc 때문에 break; 안함
         }
         if (isAllocation(&I)) {
-          
           Value* ptr = dyn_cast<Value>(cloneI);  // maskMallocWrapper(irb, I);
 
           if (isStackValue(&I)) break;
 
           Value* Size = instrumentWithByteSize(irb, cloneI, *DL);
-          
+          Instruction* next = I.getNextNode();
+          if (BitCastInst* bci = dyn_cast_or_null<BitCastInst>(next)) {
+            Type* destTy = bci->getDestTy();
+            if (destTy->isStructTy()) {
+              StructType* st = dyn_cast<StructType>(destTy);
+              if (strucTyToStructTy.count(st) > 0) {
+                IRBuilder<> tempIRB(cloneI);
+                StructType* newTy = strucTyToStructTy[st];
+                uint64_t typeSize = DL->getTypeAllocSize(st);
+                Constant* typeSizeCons =
+                    ConstantInt::get(irb.getInt64Ty(), typeSize);
+                Value* div = tempIRB.CreateUDiv(Size, typeSizeCons);
 
-          Value* newSize;
+                uint64_t newTypeSize = DL->getTypeAllocSize(newTy);
+                Constant* newTypeSizeCons =
+                    ConstantInt::get(irb.getInt64Ty(), newTypeSize);
+                Value* newSize = tempIRB.CreateMul(div, newTypeSizeCons);
+                CallInst* tempCI = dyn_cast<CallInst>(cloneI);
+                tempCI->setArgOperand(0, newSize);
+                Size = newSize;
+              }
+            }
+          }
 
           Value* allocaVar;
           BitCastInst* bci = nullptr;
@@ -1592,16 +1678,14 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
           Value* OvSz = createMask(irb, Size, module->getContext());
           Value* PtrInt = irb.CreatePtrToInt(ptr, irb.getInt64Ty());
-          continueList.insert(dyn_cast<Instruction>(PtrInt));
           Value* emptyVec = Constant::getNullValue(XMM);
 
           Value* vec0 = irb.CreateInsertElement(emptyVec, OvSz, (uint64_t)0);
-          continueList.insert(dyn_cast<Instruction>(vec0));
           Value* vec1 = irb.CreateInsertElement(vec0, PtrInt, 1);
-          continueList.insert(dyn_cast<Instruction>(vec1));
           valToVal[dyn_cast<Value>(&I)] = vec1;
-
+          break;
         } else if (funcToFunc.count(callee) > 0) {
+          // 함수가 대체되는 경우
           Function* newCallee = funcToFunc[callee];
           std::vector<Value*> plist;
 
@@ -1611,25 +1695,33 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
             // 일단 타입별로
             //
             //
-            valuePrint(arg, "funcArg");
             if (funcArg->getType()->isPointerTy()) {
               if (valToVal.count(arg) > 0) {
                 Value* newArg = valToVal[arg];
-                valuePrint(newArg, "newArg");
                 if (isXMMTy(newArg->getType())) {
                   Value* ptr = irb.CreateExtractElement(newArg, (uint64_t)1);
                   Value* tag = irb.CreateExtractElement(newArg, (uint64_t)0);
                   plist.push_back(ptr);
                   plist.push_back(tag);
+                } else {
+                  // constant null 채워서 주기
+                  Value* ptr =
+                      newArg->getType()->isPointerTy()
+                          ? irb.CreatePtrToInt(newArg, irb.getInt64Ty())
+                          : irb.CreateBitCast(newArg, irb.getInt64Ty());
+                  Value* tag = ConstantInt::get(irb.getInt64Ty(), 0);
+                  plist.push_back(ptr);
+                  plist.push_back(tag);
                 }
               } else {
                 Value* newArg;
-                if(isa<Instruction>(arg)) {
+                if (isa<Instruction>(arg)) {
                   Instruction* newInst = I.clone();
                   clone->getInstList().push_back(newInst);
                   newArg = irb.CreatePtrToInt(newInst, irb.getInt64Ty());
-                } else newArg = irb.CreatePtrToInt(arg, irb.getInt64Ty());
-                
+                } else
+                  newArg = irb.CreatePtrToInt(arg, irb.getInt64Ty());
+
                 plist.push_back(newArg);
                 Value* nullValue = Constant::getNullValue(irb.getInt64Ty());
                 plist.push_back(nullValue);
@@ -1646,25 +1738,24 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               }
             }
           }
-          typePrint(newCallee->getType(), newCallee->getName().str());
+
           Value* newVal = irb.CreateCall(newCallee, plist, I.getName());
           valToVal[dyn_cast<Value>(&I)] = newVal;
-        } else  {
-          // if callee is normal function (param are not pointerty.)
+        } else if (!callee->isDeclaration()) {
+          // if callee is normal function (param are not pointerty.) and not
+          // declaration function!
           Instruction* cloneI = I.clone();
           clone->getInstList().push_back(cloneI);
+          IRBuilder<> irb(cloneI);
           CI = dyn_cast<CallInst>(cloneI);
           for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
             Value* arg = CI->getArgOperand(i);
             if (valToVal.count(arg) > 0) {
               Value* newArg = valToVal[arg];
-              if (isXMMTy(newArg->getType())) {
-                Value* newXMM = ununTag(newArg, arg->getType(), irb);
-                CI->setArgOperand(i, newXMM);
-              } else CI->setArgOperand(i, newArg);
+              CI->setArgOperand(i, newArg);
             }
           }
-        } 
+        }
         break;
       }
       case Instruction::ICmp: {
@@ -1677,7 +1768,8 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
             Value* newOp = valToVal[op];
             if (isXMMTy(newOp->getType())) {
               // it need only ptr in this instruction;
-
+              // 포인터가 null 인지 아닌지 확인하기도 해서 그럼
+              // 개선할 가능성 있을듯
               Value* replaceOp =
                   ununTag(newOp, I.getOperand(0)->getType(), irb);
               newInst->setOperand(i, replaceOp);
@@ -1807,13 +1899,19 @@ void MPAvailable::createWrappingMain(Function& F) {
   // 메인 인자는 포인터만 받고 tag에는 걍 null value 넣기
   // 기존에 했던것을 clone 식으로 바꾸자
   // 그게 더 안정적인듯
+  //
+  // cloneBB 와 다른 점, 원래 있떤 함수를 고치는 것이라
+  // 기존의 인스트럭션이 보존이 됨
+
   std::map<Value*, Value*> valToVal;
   DenseSet<Instruction*> willBeDeletedInsts;
   DenseSet<Instruction*> continueList;
+
   for (Instruction& I : instructions(F)) {
     if (continueList.count(&I) > 0) continue;
     switch (I.getOpcode()) {
       case Instruction::Alloca: {
+        // 통과
         AllocaInst* alloca = dyn_cast<AllocaInst>(&I);
         if (alloca->getAllocatedType()->isPointerTy()) {
           if (alloca->getName().find(".addr") != std::string::npos) {
@@ -1825,7 +1923,19 @@ void MPAvailable::createWrappingMain(Function& F) {
               irb.CreateAlloca(XMM, nullptr, alloca->getName() + ".xmm");
           valToVal[dyn_cast<Value>(&I)] = newVal;
           willBeDeletedInsts.insert(&I);
-        } 
+        } else if (alloca->getAllocatedType()->isStructTy()) {
+          StructType* allocaSt =
+              dyn_cast<StructType>(alloca->getAllocatedType());
+
+          if (strucTyToStructTy.count(allocaSt) > 0) {
+            StructType* newType = strucTyToStructTy[allocaSt];
+            IRBuilder<> irb(&I);
+            Value* newVal = irb.CreateAlloca(newType->getPointerTo(), nullptr,
+                                             alloca->getName() + ".xmm.struct");
+            valToVal[dyn_cast<Value>(&I)] = newVal;
+            willBeDeletedInsts.insert(&I);
+          }
+        }
         break;
       }
       case Instruction::Store: {
@@ -1866,12 +1976,9 @@ void MPAvailable::createWrappingMain(Function& F) {
       }
       case Instruction::Load: {
         Value* ptr = I.getOperand(0);
-        valuePrint(ptr, "Load test");
         if (valToVal.count(ptr) > 0) {
           IRBuilder<> irb(&I);
           Value* newPtr = valToVal[ptr];
-
-          valuePrint(newPtr, "newPtr");
           if (isXMMTy(newPtr->getType())) {
             Value* unwrapPtr = ununTag(newPtr, ptr->getType(), irb);
             Value* newLoad = irb.CreateLoad(unwrapPtr);
@@ -1888,22 +1995,73 @@ void MPAvailable::createWrappingMain(Function& F) {
       case Instruction::Call: {
         CallInst* CI = dyn_cast<CallInst>(&I);
         Function* callee = CI->getCalledFunction();
-        if (callee) {
-          errs() << "callee Not null\n";
-        } else
-          errs() << "callee null\n";
-        instPrint(CI, "CI print");
+
+        if (!callee) {
+          // if callee is null, callee is declaration.
+          IRBuilder<> irb(CI);
+          for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
+            Value* arg = CI->getArgOperand(i);
+            if (valToVal.count(arg) > 0) {
+              Value* newArg = valToVal[arg];
+              if (isXMMTy(newArg->getType())) {
+                Value* newXMM = ununTag(newArg, arg->getType(), irb);
+                CI->setArgOperand(i, newXMM);
+              }
+            }
+          }
+          break;
+        } else if (callee->isDeclaration()) {
+          // 포인터들 다 언랩핑하기
+          // 여기서는 오퍼랜드만 교체하기
+          IRBuilder<> irb(CI);
+          for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
+            Value* arg = CI->getArgOperand(i);
+            if (valToVal.count(arg) > 0) {
+              Value* newArg = valToVal[arg];
+              if (isXMMTy(newArg->getType())) {
+                Value* newXMM = ununTag(newArg, arg->getType(), irb);
+                CI->setArgOperand(i, newXMM);
+              } else
+                CI->setArgOperand(i, newArg);
+            }
+          }
+        }
+
         if (isAllocation(&I)) {
           IRBuilder<> irb(getInsertPointAfter(&I));
 
           Value* ptr = dyn_cast<Value>(&I);  // maskMallocWrapper(irb, I);
+          Value* Size = instrumentWithByteSize(irb, &I, *DL);
+          //역계산하자
+
+          Instruction* next = I.getNextNode();
+          if (BitCastInst* bci = dyn_cast_or_null<BitCastInst>(next)) {
+            Type* destTy = bci->getDestTy();
+            if (destTy->isStructTy()) {
+              StructType* st = dyn_cast<StructType>(destTy);
+              if (strucTyToStructTy.count(st) > 0) {
+                StructType* newTy = strucTyToStructTy[st];
+                uint64_t typeSize = DL->getTypeAllocSize(st);
+                Constant* typeSizeCons =
+                    ConstantInt::get(irb.getInt64Ty(), typeSize);
+                Value* div = irb.CreateUDiv(Size, typeSizeCons);
+
+                uint64_t newTypeSize = DL->getTypeAllocSize(newTy);
+                Constant* newTypeSizeCons =
+                    ConstantInt::get(irb.getInt64Ty(), newTypeSize);
+                Value* newSize = irb.CreateMul(div, newTypeSizeCons);
+
+                CI->setArgOperand(0, newSize);
+                Size = newSize;
+              }
+            }
+          }
 
           if (isStackValue(&I)) break;
 
-          Value* Size = instrumentWithByteSize(irb, &I, *DL);
           valuePrint(Size, "instrumentWithByteSize");
 
-          Value* newSize;
+          // Value* newSize;
 
           Value* allocaVar;
           BitCastInst* bci = nullptr;
@@ -1941,11 +2099,19 @@ void MPAvailable::createWrappingMain(Function& F) {
                   Value* tag = irb.CreateExtractElement(newArg, (uint64_t)0);
                   plist.push_back(ptr);
                   plist.push_back(tag);
+                } else {
+                  Value* ptr =
+                      newArg->getType()->isPointerTy()
+                          ? irb.CreatePtrToInt(newArg, irb.getInt64Ty())
+                          : irb.CreateBitCast(newArg, irb.getInt64Ty());
+                  Value* tag = ConstantInt::get(irb.getInt64Ty(), 0);
+                  plist.push_back(ptr);
+                  plist.push_back(tag);
                 }
               } else {
                 Value* newArg = irb.CreatePtrToInt(arg, irb.getInt64Ty());
                 plist.push_back(newArg);
-                // if 
+                // if
                 Value* nullValue = Constant::getNullValue(irb.getInt64Ty());
                 plist.push_back(nullValue);
                 // 여기서는 포인터에 원래값
@@ -1965,38 +2131,6 @@ void MPAvailable::createWrappingMain(Function& F) {
           Value* newVal = irb.CreateCall(newCallee, plist, I.getName());
           valToVal[dyn_cast<Value>(&I)] = newVal;
           willBeDeletedInsts.insert(&I);
-        } else if (!callee) {
-          // if callee is null, callee is declaration.
-          IRBuilder<> irb(CI);
-          for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
-            Value* arg = CI->getArgOperand(i);
-            if (valToVal.count(arg) > 0) {
-              Value* newArg = valToVal[arg];
-              if (isXMMTy(newArg->getType())) {
-                Value* newXMM = ununTag(newArg, arg->getType(), irb);
-                CI->setArgOperand(i, newXMM);
-              }
-            }
-          }
-        } else if (callee->isDeclaration()) {
-          // 포인터들 다 언랩핑하기
-          // 여기서는 오퍼랜드만 교체하기
-          IRBuilder<> irb(CI);
-          errs() << CI->getNumArgOperands() << " NuM ARG\n";
-          for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
-            Value* arg = CI->getArgOperand(i);
-            valuePrint(arg, "arg: ");
-
-            if (valToVal.count(arg) > 0) {
-              Value* newArg = valToVal[arg];
-              valuePrint(newArg, "new arg: ");
-              if (isXMMTy(newArg->getType())) {
-                Value* newXMM = ununTag(newArg, arg->getType(), irb);
-                valuePrint(newXMM, "newXMM");
-                CI->setArgOperand(i, newXMM);
-              }else CI->setArgOperand(i, newArg);
-            }
-          }
         }
         break;
       }
@@ -2011,33 +2145,115 @@ void MPAvailable::createWrappingMain(Function& F) {
         break;
       }
       case Instruction::GetElementPtr: {
+        // 구조체, 배열, 포인터에 해당하는 3가지를 구현할 것
+        //
+        //
         IRBuilder<> irb(getInsertPointAfter(&I));
         GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(&I);
-        Value* base = gep->getPointerOperand()->stripPointerCasts();
+        Value* base = gep->getPointerOperand();
         if (valToVal.count(base) > 0) {
           Value* newBase = valToVal[base];
-          if (!isXMMTy(newBase->getType())) break;
-          Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
-          valuePrint(offset, "offset");
-          Value* ConstOffset = nullptr;
-          bool isPositive = hasNegativeOffset(gep);
+          if (base->getType()->getPointerElementType()->isStructTy()) {
+            StructType* newSt =
+                dyn_cast<StructType>(strucTyToStructTy[dyn_cast<StructType>(
+                    base->getType()->getPointerElementType())]);
 
-          Constant* nullVec = Constant::getNullValue(XMM);
-          Value* tag = createOffsetMask(irb, offset);
-          valuePrint(tag, "l4 tag");
-          Value* v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
-          valuePrint( v0 , "v0 ");
-          Value* v1 = irb.CreateInsertElement(v0, offset, 1);
-          valuePrint( v1 , "v1 ");
+            Value* newGepBase =
+                ununTag(newBase, newSt->getPointerTo(), irb, "unwrap.struct");
 
-          Value* replaceInst = irb.CreateAdd(
-              newBase, v1,
-              gep->hasName() ? gep->getName() : newBase->getName() + ".idx");
-          valToVal[dyn_cast<Value>(gep)] = replaceInst;
+            Value* newGEP;
+            if (gep->isInBounds()) {
+              std::vector<Value*> plist;
 
-          willBeDeletedInsts.insert(&I);
+              for (auto i = gep->idx_begin(); i != gep->idx_end(); i++) {
+                Value* val = *i;
+                Type* type = gep->getTypeAtIndex(
+                    cast<PointerType>(
+                        gep->getPointerOperand()->getType()->getScalarType())
+                        ->getElementType(),
+                    val);
+                if (valToVal.count(val) > 0)
+                  plist.push_back(valToVal[val]);
+                else
+                  plist.push_back(val);
+              }
+
+              newGEP = irb.CreateInBoundsGEP(newGepBase, plist);
+              valToVal[dyn_cast<Value>(gep)] = newGEP;
+            }
+          } else if (base->getType()->getPointerElementType()->isArrayTy()) {
+            if (gep->isInBounds()) {
+              std::vector<Value*> plist;
+              for (auto i = gep->idx_begin(); i != gep->idx_end(); i++) {
+                Value* val = *i;
+                Type* type = gep->getTypeAtIndex(
+                    cast<PointerType>(
+                        gep->getPointerOperand()->getType()->getScalarType())
+                        ->getElementType(),
+                    val);
+                if (valToVal.count(val) > 0)
+                  plist.push_back(valToVal[val]);
+                else
+                  plist.push_back(val);
+              }
+
+              Value* newGEP = irb.CreateInBoundsGEP(newBase, plist);
+              valToVal[dyn_cast<Value>(gep)] = newGEP;
+
+            } else {
+              // 만약 같은 타입이라면 load할 필요가 없겠찌?
+            }
+          } else if (isXMMTy(newBase->getType())) {
+            Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
+            valuePrint(offset, "offset");
+            Value* ConstOffset = nullptr;
+            bool isPositive = hasNegativeOffset(gep);
+
+            Constant* nullVec = Constant::getNullValue(XMM);
+            Value* tag = createOffsetMask(irb, offset);
+            valuePrint(tag, "l4 tag");
+            Value* v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
+            valuePrint(v0, "v0 ");
+            Value* v1 = irb.CreateInsertElement(v0, offset, 1);
+            valuePrint(v1, "v1 ");
+
+            Value* replaceInst = irb.CreateAdd(
+                newBase, v1,
+                gep->hasName() ? gep->getName() : newBase->getName() + ".idx");
+            valToVal[dyn_cast<Value>(gep)] = replaceInst;
+
+            willBeDeletedInsts.insert(&I);
+          } else if (newBase->getType()
+                         ->getPointerElementType()
+                         ->isStructTy()) {
+            if (gep->isInBounds()) {
+              std::vector<Value*> plist(gep->idx_begin(), gep->idx_end());
+              Value* newGEP = irb.CreateInBoundsGEP(newBase, plist);
+              valToVal[dyn_cast<Value>(gep)] = newGEP;
+              willBeDeletedInsts.insert(&I);
+            }
+          }
         }
         break;
+      }
+      case Instruction::ICmp:{
+        IRBuilder<> irb(&I);
+        for (int i = 0; i < I.getNumOperands(); i++) {
+          Value* op = I.getOperand(i);
+          if (valToVal.count(op) > 0) {
+            Value* newOp = valToVal[op];
+            if (isXMMTy(newOp->getType())) {
+              // it need only ptr in this instruction;
+              // 포인터가 null 인지 아닌지 확인하기도 해서 그럼
+              // 개선할 가능성 있을듯
+              Value* replaceOp =
+                  ununTag(newOp, I.getOperand(0)->getType(), irb);
+              I.setOperand(i, replaceOp);
+            } else {
+              I.setOperand(i, newOp);
+            }
+          }
+        }
       }
       default: {
         // operand 들 다 교체해주기
@@ -2069,9 +2285,41 @@ void MPAvailable::createWrappingMain(Function& F) {
     }
   }
 }
-Value* MPAvailable::createOffsetMask(IRBuilder<>& irb, Value* offset){
+Value* MPAvailable::createOffsetMask(IRBuilder<>& irb, Value* offset) {
   Value* over = irb.CreateShl(offset, 32);
   Value* result = irb.CreateOr(over, offset);
   return result;
 }
+
+// void MPAvailable::replaceStructTy(Module& M) {
+//   for (Function& F : M) {
+//     replaceStructTyInFunction(F);
+//   }
+// }
+// void MPAvailable::replaceStructTyInFunction(Function& F) {
+//   // gep만 펼치기
+//   for (Instruction& I : instructions(F)) {
+//     if (I.getOpcode() == Instruction::GetElementPtr) {
+//       IRBuilder<> irb(&I);
+//       GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(&I);
+//       gep_type_iterator GTI = gep_type_begin(gep);
+//       Value* base = gep->getPointerOperand()->stripPointerCasts();
+//       instPrint(gep, "original gep: ");
+//       for (User::op_iterator i = gep->op_begin() + 1, e = gep->op_end(); i
+//       != e;
+//            ++i, ++GTI) {
+//         Value* Op = *i;
+
+//         base = irb.CreateGEP(GTI.getIndexedType(), base, Op);
+//         valuePrint(base, "split gep ");
+//       }
+//       if(base != gep->getPointerOperand()->stripPointerCasts()) {
+//         typePrint(gep->getType(), "orig gep type");
+//         typePrint(base->getType(), "replacing type");
+//         gep->replaceAllUsesWith(base);
+//         gep->eraseFromParent();
+//       }
+//     }
+//   }
+// }
 static RegisterPass<MPAvailable> MPAVAILABLE("mpav", "MPAvailable");

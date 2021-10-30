@@ -149,9 +149,7 @@ getAddressSpaceMask(bool overflowbit) {
 }
 
 Instruction *getInsertPointBefore(Instruction* I) {
-  errs() <<" Return Test\n";
   if(BasicBlock::iterator(I) == I->getParent()->begin()) return nullptr;
-  errs() <<" Return Test not null\n";
   return &*std::prev(BasicBlock::iterator(I));
 }
 Instruction *getInsertPointAfter(Instruction *I) {
