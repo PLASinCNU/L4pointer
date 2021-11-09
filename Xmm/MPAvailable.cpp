@@ -10,6 +10,8 @@
 #include <llvm/Transforms/Utils/Local.h>
 #include <llvm/Transforms/Utils/LoopUtils.h>
 #include <stdio.h>
+#include <llvm/IR/LLVMContext.h>
+
 
 #include <initializer_list>
 
@@ -87,7 +89,6 @@ void MPAvailable::createXmmStructTy(Module& M) {
     }
     StructType* newStructTy =
         StructType::create(plist, st->getName().str() + ".new.struct");
-    typePrint(newStructTy, "new struct");
     strucTyToStructTy[st] = newStructTy;
   }
 }
@@ -141,8 +142,8 @@ void MPAvailable::transformAlloc(Function& F) {
 
 bool MPAvailable::runOnModule(Module& M) {
   DL = &M.getDataLayout();
+
   module = &M;
-  DenseMap<Value*, const SCEV*> PointerBounds;
 
   createXmmStructTy(M);
   // replaceStructTy(M);
@@ -169,23 +170,35 @@ bool MPAvailable::runOnModule(Module& M) {
     createWrappingFunction(F);
   }
   for (auto& F : M) {
-    createWrappingMain(F);
+   createWrappingMain(F);
   }
   std::vector<Function*> workList(willBeDeletedFunctions.begin(),
                                   willBeDeletedFunctions.end());
+  
   while (!workList.empty()) {
     Function* F = workList.front();
     if (F->users().empty()) {
-      errs() << F->getName() << " is being deleted ...";
       workList.erase(workList.begin());
       F->eraseFromParent();
     } else {
+      // for(Value* use : F->users()) valuePrint(use, "F User");
       workList.erase(workList.begin());
       workList.push_back(F);
     }
   }
-  //verifyModule(M);
-  // eraseRemoveInstruction();
+  errs() << "Deleting process finished!\n";
+  
+  // verifyModule(M);
+  eraseRemoveInstruction();
+  // M.dropAllReferences();
+  // for (auto& F : M) {
+  //   errs() << "Clearing ... " << F.getName() << "\n";
+  //   // if (F.getName().str() == "Wrapping_globalReturnsTrue") continue;
+  //   F.dropAllReferences();
+  //   Constant* cons = dyn_cast<Constant>(&F);
+  //   cons->removeDeadConstantUsers();
+  //   delete &F;
+  // }
   return false;
 }
 
@@ -1213,6 +1226,7 @@ void MPAvailable::transformFunction(Function* F) {
 }
 void MPAvailable::createWrappingFunction(Function& F) {
   if (F.getName() == "main") return;
+  // if (isa<Constant>(&F)) return;
   bool mustWrapped = false;
 
   std::map<Value*, Value*> valToVal;
@@ -1221,13 +1235,10 @@ void MPAvailable::createWrappingFunction(Function& F) {
   std::map<Value*, Type*> valToType;
 
   Function* newFunc = funcToFunc[&F];
-  errs() << "Wrapping Function ..." << F.getName() << "\n";
-  errs() << "Creating Function Type ..." << F.getName() << "\n";
   int i = 0;
   std::vector<Type*> plist;
   for (Argument& arg : F.args()) {
     Value* vArg = dyn_cast<Value>(&arg);
-    valuePrint(vArg, "vArg");
     if (arg.getType()->isPointerTy()) {
       plist.push_back(Type::getInt64Ty(F.getContext()));
       plist.push_back(Type::getInt64Ty(F.getContext()));
@@ -1249,17 +1260,7 @@ void MPAvailable::createWrappingFunction(Function& F) {
   for (BasicBlock& BB : F.getBasicBlockList()) {
     cloneBB(newFunc, &BB, argToArg, valToVal);
   }
-  for (BasicBlock& BB : F.getBasicBlockList()) {
-    Instruction* terminator = BB.getTerminator();
-    Instruction* newTerminator = basicToBasic[&BB]->getTerminator();
 
-    if (BranchInst* br = dyn_cast<BranchInst>(terminator)) {
-      BranchInst* newBr = dyn_cast<BranchInst>(newTerminator);
-      if (br->isConditional()) {
-      } else {
-      }
-    }
-  }
   // replaceFunction(newFunc, &F);
   // F.eraseFromParent();
 }
@@ -1373,10 +1374,8 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
       case Instruction::Store: {
         Instruction* beforeBefore =
             getInsertPointBefore(getInsertPointBefore(&I));
-        if (isAllocation(beforeBefore)) break;
         Value* v0 = I.getOperand(0);            // value
         Value* v1 = valToVal[I.getOperand(1)];  // pointer
-
         if (argToArg.count(v0->getName())) {
           // Argument를 저장하는 과정
           // Argument 저장 통과
@@ -1396,12 +1395,8 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
             irb.CreateStore(L4, v1);
           } else {
-            Value* val;
-            if (valToVal.count(v0) > 0)
-              val = valToVal[v0];
-            else
-              val = v0;
-
+            int index = argToArg[v0->getName()];
+            Value* val = cloneFunc->getArg(index);
             irb.CreateStore(val, v1);
           }
           break;
@@ -1419,11 +1414,13 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
           if (isXMMTy(newPointer->getType())) {
             // 통과
-            Value* clearTagPointer =
-                ununTag(newPointer, pointer->getType(), irb,
-                        newPointer->hasName() ? newPointer->getName().str()
-                                              : ".clear.tag");
-            irb.CreateStore(newValue, clearTagPointer);
+            instPrint(&I, "I");
+            valuePrint(newPointer, "newPointer");
+            Value* clearTag = ununTag(newPointer, pointer->getType(), irb);
+            if(isXMMTy(newValue->getType())) {
+              Value* clearVal = ununTag(newValue, value->getType(), irb);
+              irb.CreateStore(clearVal, clearTag);
+            } else irb.CreateStore(newValue, clearTag);
           } else {
             // Pointer 가 XMM TYPE 이 아님 근데 왜 코드가 이러지?
 
@@ -1450,30 +1447,15 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
             }
           }
         } else {
-          // Pointer 가 절대 XMM Type이 되지도 않고
-          // 여기로 오면 문제 있는 코드 매칭되는 포인터가 없음 지워도 되는 코드
-          // 지우면 안됨 글로벌 변수에 대해서도 혹시 모르니까 생각하자
+          // 글로벌 변수
           // value is constant
-          Value* newPointer = valToVal[pointer];
-          if (isXMMTy(newPointer->getType())) {
-            Value* clearTagPointer =
-                ununTag(newPointer, pointer->getType(), irb,
-                        newPointer->hasName() ? newPointer->getName().str()
-                                              : ".clear.tag");
-            irb.CreateStore(v0, clearTagPointer);
+          StoreInst* si = dyn_cast<StoreInst>(&I);
+          Value* ptr = si->getPointerOperand();
+          if (GlobalValue* gv = dyn_cast_or_null<GlobalValue>(ptr)) {
+            Value* value = si->getValueOperand();
+            Value* newValue = valToVal.count(value) ? valToVal[value] : value;
+            irb.CreateStore(newValue, ptr);
           } else {
-            if (isXMMTy(v0->getType())) {
-              irb.CreateStore(v0, newPointer);
-            } else {
-              Constant* nullVec = Constant::getNullValue(XMM);
-              Constant* nullValue =
-                  Constant::getNullValue(Type::getInt64Ty(clone->getContext()));
-              Value* vec1 =
-                  irb.CreateInsertElement(nullVec, nullValue, uint64_t(0));
-              Value* vec2 =
-                  irb.CreateInsertElement(vec1, nullValue, uint64_t(1));
-              irb.CreateStore(vec2, newPointer);
-            }
           }
         }
         break;
@@ -1497,18 +1479,31 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
             Value* newLoad = irb.CreateLoad(pointer);
             valToVal[dyn_cast<Value>(&I)] = newLoad;
           }
+        } else {
+          Value* op = I.getOperand(0);
+          if (GlobalValue* gv = dyn_cast_or_null<GlobalValue>(op)) {
+            Instruction* newInst = I.clone();
+            clone->getInstList().push_back(newInst);
+            valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
+          } else {
+            errs() << "this instruction has problem!\n";
+            instPrint(&I, "problem");
+            instPrint(getInsertPointBefore(&I), "before");
+          }
         }
         break;
       }
       case Instruction::GetElementPtr: {
         // 구조체, 배열, 포인터에 대해서 모두 생각해야 함
         // PASS
+
         GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(&I);
         Value* base = gep->getPointerOperand();
         Value* realBase = gep->getPointerOperand();
 
         if (valToVal.count(base) > 0) {
           Value* newBase = valToVal[base];
+
           if (base->getType()->getPointerElementType()->isStructTy()) {
             //구조체일 때
             if (gep->getType() != base->getType()) {
@@ -1583,24 +1578,69 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
             Value* replaceInst = irb.CreateAdd(
                 newBase, v1,
                 gep->hasName() ? gep->getName() : newBase->getName() + ".idx");
-            valToVal[dyn_cast<Value>(gep)] = replaceInst;
+
+            valToVal[dyn_cast<Value>(&I)] = replaceInst;
+          } else {
+            std::vector<Value*> plist;
+            for (auto i = gep->idx_begin(); i != gep->idx_end(); i++) {
+              Value* val = *i;
+              if (valToVal.count(val) > 0)
+                plist.push_back(valToVal[val]);
+              else
+                plist.push_back(val);
+            }
+            if (gep->isInBounds()) {
+              Value* newGEP = irb.CreateInBoundsGEP(newBase, plist);
+              valToVal[dyn_cast<Value>(&I)] = newGEP;
+            } else {
+              Value* newGEP = irb.CreateGEP(newBase, plist);
+              valToVal[dyn_cast<Value>(&I)] = newGEP;
+            }
           }
           break;
         } else {
           // break 넣지 않고 default block에서 처리
+          errs() << "this instruction has problem!\n";
+          instPrint(&I, "problem");
         }
       }
       case Instruction::Call: {
         CallInst* CI = dyn_cast<CallInst>(&I);
         Function* callee = CI->getCalledFunction();
-
         Instruction* cloneI;
         if (!callee) {
           // if callee is null, callee is declaration.
           // 왜 인지 모르겠으나 declaration 함수가  null 인 경우가 있음
+          // 이제 왜인지 알지
+          // Caller에 해당하는 opearand가 ConstantExpr 인 경우임
+
           cloneI = I.clone();
           clone->getInstList().push_back(cloneI);
           CI = dyn_cast<CallInst>(cloneI);
+
+          ConstantExpr* cExpr = dyn_cast<ConstantExpr>(CI->getCalledOperand());
+
+          Constant* newCons = cloneConstantExpr(cExpr);
+          CI->setCalledOperand(newCons);
+          Value* calleeVal = CI->getCalledOperand();
+          // if (isa<Instruction>(calleeVal))
+          //   errs() << "Test ConstantExpr is Instruction\n";
+          // if (checks.count(cExpr) > 0) {
+          //   errs() << "내가 생각한 것이 맞음 ㅇㅇ\n";
+          //   errs() << cExpr << " : check!!!\n";
+          // }
+          // errs() << "\n";
+          for (int i = 0; i < cExpr->getNumOperands(); i++) {
+            Value* calleeFunc = cExpr->getOperand(i);
+            if (Function* func = dyn_cast_or_null<Function>(calleeFunc)) {
+              if (funcToFunc.count(func) > 0) {
+                Function* newFunc = funcToFunc[func];
+                cExpr->setOperand(i, newFunc);
+                checks.insert(cExpr);
+              }
+            }
+          }
+
           IRBuilder<> tempIRB(cloneI);
 
           for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
@@ -1783,14 +1823,76 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
         break;
       }
-      case Instruction::BitCast: {
+      case Instruction::BitCast:
         // If it is for malloc instruction, it should be deleted.
         // L4 pointer don't need bitcast instruction.
+        // 그냥 배열일때 필요함, 하아 이걸 어떻게 고치나...
         if (valToVal.count(I.getOperand(0)) > 0) {
+          if (isAllocation(getInsertPointBefore(&I))){ 
+            valToVal[dyn_cast<Value>(&I)] = valToVal[I.getOperand(0)];
+            break;
+          }
+
           Value* op = valToVal[I.getOperand(0)];
-          valToVal[dyn_cast<Value>(&I)] = op;
+          if (isXMMTy(op->getType())) {
+            Value* newOp = ununTag(op, I.getOperand(0)->getType(), irb);
+            Instruction* newInst = I.clone();
+            clone->getInstList().push_back(newInst);
+            newInst->setOperand(0, newOp);
+            valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
+          } else {
+            Instruction* newInst = I.clone();
+            newInst->setName(I.getName());
+            newInst->setOperand(0, op);
+            clone->getInstList().push_back(newInst);
+            valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
+          }
           break;
+        } else {
         }
+      case Instruction::PHI: {
+        PHINode* phi = dyn_cast<PHINode>(&I);
+        Instruction* newInst = I.clone();
+        PHINode* newPhi = dyn_cast<PHINode>(newInst);
+
+        for (int i = 0; i < I.getNumOperands(); i++) {
+          if (valToVal.count(I.getOperand(i))) {
+            if (isXMMTy(valToVal[I.getOperand(i)]->getType())) {
+              if (I.getOperand(i)->getType() ==
+                  valToVal[I.getOperand(i)]->getType()) {
+                Value* newVal = ununTag(valToVal[I.getOperand(i)],
+                                        I.getOperand(i)->getType(), irb);
+                newInst->setOperand(i, newVal);
+              }
+            } else {
+              newInst->setOperand(i, valToVal[I.getOperand(i)]);
+            }
+          }
+        }
+
+        for (int i = 0; i < phi->getNumIncomingValues(); i++) {
+          BasicBlock* bb = newPhi->getIncomingBlock(i);
+          BasicBlock* newBB = dyn_cast<BasicBlock>(valToVal[bb]);
+          newPhi->replaceIncomingBlockWith(bb, newBB);
+        }
+        valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
+        clone->getInstList().push_back(newInst);
+        break;
+      }
+      case Instruction::Br: {
+        Instruction* newInst = I.clone();
+        newInst->setName(I.getName());
+        BranchInst* newBr = dyn_cast<BranchInst>(newInst);
+        if (newBr->isConditional()) {
+          Value* oldCond = newBr->getCondition();
+          Value* newCond = valToVal[oldCond];
+          newBr->setCondition(newCond);
+        }
+        for (int i = 0; i < I.getNumOperands(); i++) {
+          newInst->setOperand(i, valToVal[I.getOperand(i)]);
+        }
+        clone->getInstList().push_back(newInst);
+        break;
       }
       default:
         Instruction* newInst = I.clone();
@@ -1839,14 +1941,12 @@ void MPAvailable::declareWrappingFunction(Function& F) {
   std::map<StringRef, int> argToArg;
   std::map<BasicBlock*, BasicBlock*> basicToBasic;
   std::map<Value*, Type*> valToType;
+  // if (isa<Constant>(&F)) return;
 
-  errs() << "Wrapping Function ..." << F.getName() << "\n";
-  errs() << "Creating Function Type ..." << F.getName() << "\n";
   int i = 0;
   std::vector<Type*> plist;
   for (Argument& arg : F.args()) {
     Value* vArg = dyn_cast<Value>(&arg);
-    valuePrint(vArg, "vArg");
     if (arg.getType()->isPointerTy()) {
       plist.push_back(Type::getInt64Ty(F.getContext()));
       plist.push_back(Type::getInt64Ty(F.getContext()));
@@ -1886,6 +1986,7 @@ void MPAvailable::declareWrappingFunction(Function& F) {
   funcToFunc[&F] = newFunc;
   wrappingFunctions.insert(newFunc);
   willBeDeletedFunctions.insert(&F);
+
   // replaceFunction(newFunc, &F);
   // F.eraseFromParent();
 }
@@ -1939,7 +2040,6 @@ void MPAvailable::createWrappingMain(Function& F) {
         break;
       }
       case Instruction::Store: {
-        instPrint(&I, "Store: ");
         Value* origPointer = I.getOperand(1);
         Value* val = valToVal.count(I.getOperand(0)) > 0
                          ? valToVal[I.getOperand(0)]
@@ -1947,7 +2047,6 @@ void MPAvailable::createWrappingMain(Function& F) {
         IRBuilder<> irb(&I);
         if (valToVal.count(origPointer) > 0) {
           Value* newPointer = valToVal[origPointer];
-          valuePrint(newPointer, "newPointer");
           if (isXMMTy(newPointer->getType())) {
             Value* unwrapPtr = ununTag(newPointer, origPointer->getType(), irb);
             irb.CreateStore(val, unwrapPtr);
@@ -2059,7 +2158,6 @@ void MPAvailable::createWrappingMain(Function& F) {
 
           if (isStackValue(&I)) break;
 
-          valuePrint(Size, "instrumentWithByteSize");
 
           // Value* newSize;
 
@@ -2127,7 +2225,6 @@ void MPAvailable::createWrappingMain(Function& F) {
               }
             }
           }
-          typePrint(newCallee->getType(), "newCallee");
           Value* newVal = irb.CreateCall(newCallee, plist, I.getName());
           valToVal[dyn_cast<Value>(&I)] = newVal;
           willBeDeletedInsts.insert(&I);
@@ -2205,17 +2302,13 @@ void MPAvailable::createWrappingMain(Function& F) {
             }
           } else if (isXMMTy(newBase->getType())) {
             Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
-            valuePrint(offset, "offset");
             Value* ConstOffset = nullptr;
             bool isPositive = hasNegativeOffset(gep);
 
             Constant* nullVec = Constant::getNullValue(XMM);
             Value* tag = createOffsetMask(irb, offset);
-            valuePrint(tag, "l4 tag");
             Value* v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
-            valuePrint(v0, "v0 ");
             Value* v1 = irb.CreateInsertElement(v0, offset, 1);
-            valuePrint(v1, "v1 ");
 
             Value* replaceInst = irb.CreateAdd(
                 newBase, v1,
@@ -2236,7 +2329,7 @@ void MPAvailable::createWrappingMain(Function& F) {
         }
         break;
       }
-      case Instruction::ICmp:{
+      case Instruction::ICmp: {
         IRBuilder<> irb(&I);
         for (int i = 0; i < I.getNumOperands(); i++) {
           Value* op = I.getOperand(i);
@@ -2322,4 +2415,15 @@ Value* MPAvailable::createOffsetMask(IRBuilder<>& irb, Value* offset) {
 //     }
 //   }
 // }
+
+static Constant* cloneConstantExpr(ConstantExpr* cExpr) {
+  switch (cExpr->getOpcode()) {
+    case Instruction::BitCast:
+
+      return ConstantExpr::getBitCast(cExpr->getOperand(0), cExpr->getType());
+    default:
+      return cExpr;
+  }
+}
+
 static RegisterPass<MPAvailable> MPAVAILABLE("mpav", "MPAvailable");

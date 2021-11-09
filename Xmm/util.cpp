@@ -375,7 +375,7 @@ Value* createMask(IRBuilder<>& irb, Value* size, LLVMContext& ctx){
   // underflow를 보기위한 태그는 0으로 놔도 됨
   ConstantInt* one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31));
   Value* maskNoShift = irb.CreateSub(one, size, "sub");
-  valuePrint(maskNoShift, "mask");
+  //valuePrint(maskNoShift, "mask");
   return maskNoShift;
 }
 

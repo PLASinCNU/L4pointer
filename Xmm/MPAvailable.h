@@ -23,7 +23,7 @@
 
 using namespace llvm;
 
-
+static Constant* cloneConstantExpr(ConstantExpr* cExpr);
 class MPAvailable : public ModulePass {
   // to avoid tagging
  public:
@@ -55,6 +55,7 @@ class MPAvailable : public ModulePass {
   DenseSet<Function*> transformFunctions;
   DenseSet<Function*> wrappingFunctions;
   DenseSet<Function*> willBeDeletedFunctions;
+  DenseSet<ConstantExpr*> checks;
 
   DenseSet<Instruction*>
       continueList;  // 내가 추가하는 모든 instruction을 여기 추가하기,
