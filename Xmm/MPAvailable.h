@@ -16,6 +16,7 @@
 #include "AddressSpace.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
@@ -51,6 +52,7 @@ class MPAvailable : public ModulePass {
   DenseSet<Instruction*> replaceInst;
   DenseSet<Value*> allocaGEPSet;
   DenseSet<Value*> xmmLoadSet;
+  DenseSet<Function*> usedFunctionPointer;
 
   DenseSet<Function*> transformFunctions;
   DenseSet<Function*> wrappingFunctions;
@@ -77,7 +79,7 @@ class MPAvailable : public ModulePass {
   Function* AddWithOverflowFunc;
 
   void transformAlloc(Function& F);
-
+  bool isXMMPtrTy(Type* type);
   void getAnalysisUsage(AnalysisUsage& AU) const override;
 
   void createXmmStructTy(Module& M);
@@ -85,10 +87,13 @@ class MPAvailable : public ModulePass {
                       std::map<StringRef, int>& argToArg,
                       std::map<Value*, Value*>& valToVal);
 
-  // void replaceStructTy(Module& M ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep 쪼개기
-  // void replaceStructTyInFunction(Function& F ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep 쪼개기
+  // void replaceStructTy(Module& M ); //  이 함수에서는 그냥 struct 타입에
+  // 대해서만 바꿔줌, 그리고 gep 쪼개기 void replaceStructTyInFunction(Function&
+  // F ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep
+  // 쪼개기
+  std::set<StructType*> transStructs;
 
-
+  StructType* createStructureType(StructType* st);
   void replaceFunction(Function* newFunc, Function* oldFunc);
   void eraseFunction(Function* function);
   void eraseRemoveInstruction();
@@ -96,6 +101,7 @@ class MPAvailable : public ModulePass {
   void createWrappingFunction(Function& F);
   void declareWrappingFunction(Function& F);
   void createWrappingMain(Function& F);
+  Value* createL4Ptr(Value* ptr, IRBuilder<>& irb);
 
   Instruction* handleAlloca(AllocaInst* alloca, IRBuilder<>& irb);
 
@@ -152,6 +158,8 @@ class MPAvailable : public ModulePass {
 
   Value* ununTag(Value* xmmPtr, Type* origType, IRBuilder<>& irb,
                  std::string prefix = "");
+  Value* ununTag(Value* xmmPtr, Type* origType, IRBuilder<>& irb,
+                 DenseSet<Instruction*>& conList, std::string prefix = "");
   Value* createXmmTag(IRBuilder<>& irb, Value* size, std::string prefix);
 
   bool isXMMTy(Type* type);
@@ -164,4 +172,31 @@ class MPAvailable : public ModulePass {
   void handlePtrToInt(PtrToIntInst* pti);
   void handleIntToPtr(IntToPtrInst* itp);
   void handleSubOrAdd(Instruction* i);
+  Value* instrumentWithByteSize(IRBuilder<>& B, Instruction* I,
+                                std::map<Value*, Value*>& valToVal);
+  bool checkShouldBeWrapped(Function& F);
+  void assertGEP(Value* newGEP) {
+    // valuePrint(newGEP, "Assert GEP");
+    GetElementPtrInst* newGEPInst = dyn_cast<GetElementPtrInst>(newGEP);
+
+    SmallVector<Value*, 16> Idxs(newGEPInst->indices());
+    Type* ElTy = GetElementPtrInst::getIndexedType(
+        newGEPInst->getSourceElementType(), Idxs);
+    if (!newGEPInst->getType()->isPtrOrPtrVectorTy()) {
+      errs() << "!newGEPInst->getType()->isPtrOrPtrVectorTy()\n";
+      exit(0);
+    }
+    if (!(newGEPInst->getResultElementType() == ElTy)) {
+      errs() << "!(newGEPInst->getResultElementType() == ElTy)\n";
+      exit(0);
+    }
+
+    if (newGEPInst->getParent()->getParent()->getName() ==
+        "Wrapping_hashtable_getlock") {
+      valuePrint(newGEP, "Assert GEP");
+      typePrint(ElTy, "ElTy");
+      typePrint(newGEPInst->getResultElementType(), "result");
+      typePrint(newGEP->getType(), "newGEP type");
+    }
+  };
 };
