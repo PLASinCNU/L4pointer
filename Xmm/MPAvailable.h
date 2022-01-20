@@ -14,6 +14,7 @@
 
 //#include "llvm-sra/SRA/SymbolicRangeAnalysis.h"
 #include "AddressSpace.h"
+#include "SafeL4Alloc.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
@@ -71,7 +72,7 @@ class MPAvailable : public ModulePass {
   ScalarEvolution* SE;
   DominatorTree* DT;
   LoopInfo* LI;
-
+  SafeL4Alloc* L4Alloc;
   VectorType* XMM;
   PointerType* XMM_POINTER;
   // SymbolicRangeAnalysis *SRA;
@@ -175,7 +176,11 @@ class MPAvailable : public ModulePass {
   Value* instrumentWithByteSize(IRBuilder<>& B, Instruction* I,
                                 std::map<Value*, Value*>& valToVal);
   bool checkShouldBeWrapped(Function& F);
-  void assertGEP(Value* newGEP) {
+
+  std::set<StructType*> globalSTs;
+
+  StructType* findStruct(StructType* st);
+  inline void assertGEP(Value* newGEP) {
     // valuePrint(newGEP, "Assert GEP");
     GetElementPtrInst* newGEPInst = dyn_cast<GetElementPtrInst>(newGEP);
 
