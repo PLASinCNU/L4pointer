@@ -43,7 +43,7 @@ class MPAvailable : public ModulePass {
   DenseMap<GetElementPtrInst*, ConstantInt*>
       gepToOffset;  // offset이 constant로 나올 경우
 
-  DenseMap<StructType*, StructType*> strucTyToStructTy;
+  // DenseMap<StructType*, StructType*> strucTyToStructTy;
   DenseMap<GetElementPtrInst*, bool> gepToPositive;
   DenseMap<Function*, Function*> funcToFunc;
   DenseSet<Value*> TagPtrOrigin;
@@ -86,7 +86,8 @@ class MPAvailable : public ModulePass {
   void createXmmStructTy(Module& M);
   BasicBlock* cloneBB(Function* cloneFunc, BasicBlock* orig,
                       std::map<StringRef, int>& argToArg,
-                      std::map<Value*, Value*>& valToVal);
+                      std::map<Value*, Value*>& valToVal,
+                      std::map<Value*, Value*>& arrToPtr);
 
   // void replaceStructTy(Module& M ); //  이 함수에서는 그냥 struct 타입에
   // 대해서만 바꿔줌, 그리고 gep 쪼개기 void replaceStructTyInFunction(Function&
@@ -94,7 +95,7 @@ class MPAvailable : public ModulePass {
   // 쪼개기
   std::set<StructType*> transStructs;
 
-  StructType* createStructureType(StructType* st);
+  // StructType* createStructureType(StructType* st);
   void replaceFunction(Function* newFunc, Function* oldFunc);
   void eraseFunction(Function* function);
   void eraseRemoveInstruction();
