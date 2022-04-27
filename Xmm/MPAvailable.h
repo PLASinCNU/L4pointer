@@ -38,6 +38,7 @@ class MPAvailable : public ModulePass {
   DenseMap<GetElementPtrInst*, GetElementPtrInst*> PreemptedArithOffsets;
   DenseMap<AllocaInst*, AllocaInst*> ptrToXMM;
   DenseMap<AllocaInst*, Type*> xmmToType;
+  DenseMap<GlobalVariable*, GlobalVariable*> gToGV;
   DenseMap<Value*, Type*> valueToType;  // Use를 통해서 type을 바꾸어주자
   DenseMap<GetElementPtrInst*, Value*> gepToValue;  // offset 계산을 위함
   DenseMap<GetElementPtrInst*, ConstantInt*>
@@ -99,7 +100,7 @@ class MPAvailable : public ModulePass {
   void replaceFunction(Function* newFunc, Function* oldFunc);
   void eraseFunction(Function* function);
   void eraseRemoveInstruction();
-
+  void createGlobalValue();
   void createWrappingFunction(Function& F);
   void declareWrappingFunction(Function& F);
   void createWrappingMain(Function& F);

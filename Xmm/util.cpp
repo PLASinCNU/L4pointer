@@ -1,5 +1,8 @@
 #include "util.h"
+
 #include <llvm/Analysis/ConstantFolding.h>
+#include <llvm/IR/InstIterator.h>
+
 #include <map>
 #include <set>
 static std::map<std::string, int> MallocFuncs = {
@@ -20,17 +23,49 @@ static std::map<std::string, int> MallocFuncs = {
     {"__cxa_allocate_exception", 0},
 };
 
+static std::set<std::string> ExternStruct = {"struct._IO_FILE",
+                                             "struct._IO_marker",
+                                             "union.pthread_mutex_t",
+                                             "struct.__pthread_mutex_s",
+                                             "struct.__pthread_internal_list",
+                                             "union.pthread_cond_t",
+                                             "struct.__pthread_cond_s",
+                                             "union.anon",
+                                             "union.pthread_mutexattr_t",
+                                             "struct.anon",
+                                             "thread_args",
+                                             "struct.stat",
+                                             "struct.stats_t"};
+
+bool isExternalStruct(std::string name) { return ExternStruct.count(name) > 0; }
+bool isUsedFunctionPointer(Function *F) {
+  for (Value *val : F->users()) {
+    if (!isa<ConstantExpr>(val)) return false;
+  }
+  return true;
+}
+bool isAllUseSelf(Function *F) {
+  if (F->doesNotRecurse()) return false;
+
+  for (Value *v : F->users()) {
+    if (CallInst *CI = dyn_cast<CallInst>(v)) {
+      Function *parent = CI->getParent()->getParent();
+      if (parent != F) return false;
+    }
+  }
+  return true;
+}
 static std::map<std::string, int> MallocWrappers = {
     /* custom pool allocators
      * This does not include direct malloc() wrappers such as xmalloc, only
      * functions that allocate a large memory pool once and then perform small
      * allocations in that pool. */
-    {"ggc_alloc", 0},        // gcc
-    {"alloc_anon", 1},       // gcc
-    {"ngx_alloc", 0},        // nginx
-    {"ngx_palloc", 1},       // nginx
-    {"ngx_palloc_small", 1}, // nginx ngx_palloc inline
-    {"ngx_palloc_large", 1}, // nginx ngx_palloc inline
+    {"ggc_alloc", 0},         // gcc
+    {"alloc_anon", 1},        // gcc
+    {"ngx_alloc", 0},         // nginx
+    {"ngx_palloc", 1},        // nginx
+    {"ngx_palloc_small", 1},  // nginx ngx_palloc inline
+    {"ngx_palloc_large", 1},  // nginx ngx_palloc inline
 };
 
 static std::set<std::string> CallocFuncs = {
@@ -82,10 +117,8 @@ bool isAllocationFunc(Function *F) {
 }
 
 bool isAllocation(Instruction *I) {
-  if (!I)
-    return false;
-  if (isa<AllocaInst>(I))
-    return false;
+  if (!I) return false;
+  if (isa<AllocaInst>(I)) return false;
 
   if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
     llvm::CallSite CS(I);
@@ -97,31 +130,30 @@ bool isAllocation(Instruction *I) {
   return false;
 }
 
-bool isHeapAlloc(Instruction& I){
-  if(isa<CallInst>(I) || isa<InvokeInst>(I)){
+bool isHeapAlloc(Instruction &I) {
+  if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
     llvm::CallSite cs(&I);
     return isHeapAllocation(cs);
   }
   return false;
 }
 
-bool isStackValue(Instruction* I){
-  if(isa<AllocaInst>(I)){
-    AllocaInst* alloca = dyn_cast<AllocaInst>(I);
-    Type* allocType = alloca->getAllocatedType();
-    
-    if(allocType->isPointerTy()) {
+bool isStackValue(Instruction *I) {
+  if (isa<AllocaInst>(I)) {
+    AllocaInst *alloca = dyn_cast<AllocaInst>(I);
+    Type *allocType = alloca->getAllocatedType();
+
+    if (allocType->isPointerTy()) {
       return false;
-    }
-    else return true;
+    } else
+      return true;
   }
   return false;
 }
 
 bool isHeapAllocation(CallSite &CS) {
   Function *F = CS.getCalledFunction();
-  if (!F || !F->hasName() || F->isIntrinsic())
-    return false;
+  if (!F || !F->hasName() || F->isIntrinsic()) return false;
 
   if (isMalloc(F)) {
   } else if (isCalloc(F)) {
@@ -138,8 +170,7 @@ static inline bool scanList(std::set<std::string> list, Function *F) {
   return list.count(F->getName().str()) > 0;
 }
 
-unsigned long long 
-getAddressSpaceMask(bool overflowbit) {
+unsigned long long getAddressSpaceMask(bool overflowbit) {
   unsigned long long Mask = 0xFFFFFFFFFFFF;
   if (overflowbit) {
     Mask |= (1ULL << 63);
@@ -148,8 +179,8 @@ getAddressSpaceMask(bool overflowbit) {
   return Mask;
 }
 
-Instruction *getInsertPointBefore(Instruction* I) {
-  if(BasicBlock::iterator(I) == I->getParent()->begin()) return nullptr;
+Instruction *getInsertPointBefore(Instruction *I) {
+  if (BasicBlock::iterator(I) == I->getParent()->begin()) return nullptr;
   return &*std::prev(BasicBlock::iterator(I));
 }
 Instruction *getInsertPointAfter(Instruction *I) {
@@ -172,8 +203,7 @@ Instruction *getInsertPointAfter(Instruction *I) {
     return Br;
   }
 
-  if (isa<PHINode>(I))
-    return &*I->getParent()->getFirstInsertionPt();
+  if (isa<PHINode>(I)) return &*I->getParent()->getFirstInsertionPt();
 
   return &*std::next(BasicBlock::iterator(I));
 }
@@ -182,26 +212,25 @@ Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
                               const DataLayout &DL, AllocationType CallType) {
   int SizeArg = getSizeArg(I);
   switch (CallType) {
-  case Malloc:
-  case Realloc: {
-    CallSite CS(I);
-    return CS.getArgOperand(SizeArg);
-  }
-  case Calloc: {
-    CallSite CS(I);
-    Value *NumElements = CS.getArgOperand(0);
-    Value *ElementSize = CS.getArgOperand(1);
-    return B.CreateMul(NumElements, ElementSize);
-  }
-  case Alloca: {
-    AllocaInst *AI = cast<AllocaInst>(I);
-    Value *Size = B.getInt64(DL.getTypeAllocSize(AI->getAllocatedType()));
+    case Malloc:
+    case Realloc: {
+      CallSite CS(I);
+      return CS.getArgOperand(SizeArg);
+    }
+    case Calloc: {
+      CallSite CS(I);
+      Value *NumElements = CS.getArgOperand(0);
+      Value *ElementSize = CS.getArgOperand(1);
+      return B.CreateMul(NumElements, ElementSize);
+    }
+    case Alloca: {
+      AllocaInst *AI = cast<AllocaInst>(I);
+      Value *Size = B.getInt64(DL.getTypeAllocSize(AI->getAllocatedType()));
 
-    if (AI->isArrayAllocation())
-      Size = B.CreateMul(Size, AI->getArraySize());
+      if (AI->isArrayAllocation()) Size = B.CreateMul(Size, AI->getArraySize());
 
-    return Size;
-  }
+      return Size;
+    }
   }
   return nullptr; /* never reached */
 }
@@ -210,82 +239,80 @@ Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
                               const DataLayout &DL) {
   AllocationType CallType = getCallType(I);
   int SizeArg = getSizeArg(I);
-  
+
   switch (CallType) {
-  case Malloc:
-  case Realloc: {
-    CallSite CS(I);
-    return CS.getArgOperand(SizeArg);
-  }
-  case Calloc: {
-    CallSite CS(I);
-    Value *NumElements = CS.getArgOperand(0);
-    Value *ElementSize = CS.getArgOperand(1);
-    return B.CreateMul(NumElements, ElementSize);
-  }
-  case Alloca: {
-    AllocaInst *AI = cast<AllocaInst>(I);
-    Value *Size = B.getInt64(DL.getTypeAllocSize(AI->getAllocatedType()));
+    case Malloc:
+    case Realloc: {
+      CallSite CS(I);
+      return CS.getArgOperand(SizeArg);
+    }
+    case Calloc: {
+      CallSite CS(I);
+      Value *NumElements = CS.getArgOperand(0);
+      Value *ElementSize = CS.getArgOperand(1);
+      return B.CreateMul(NumElements, ElementSize);
+    }
+    case Alloca: {
+      AllocaInst *AI = cast<AllocaInst>(I);
+      Value *Size = B.getInt64(DL.getTypeAllocSize(AI->getAllocatedType()));
 
-    if (AI->isArrayAllocation())
-      Size = B.CreateMul(Size, AI->getArraySize());
+      if (AI->isArrayAllocation()) Size = B.CreateMul(Size, AI->getArraySize());
 
-    return Size;
-  }
-  case AllocaNone: return nullptr;
-  default: return nullptr;
+      return Size;
+    }
+    case AllocaNone:
+      return nullptr;
+    default:
+      return nullptr;
   }
   return nullptr; /* never reached */
 }
 
-const SCEV* getSizeSCEV(Instruction *I, ScalarEvolution &SE) {
+const SCEV *getSizeSCEV(Instruction *I, ScalarEvolution &SE) {
   AllocationType CallType = getCallType(I);
-  if (CallType == AllocationType::AllocaNone)
-    return nullptr;
+  if (CallType == AllocationType::AllocaNone) return nullptr;
 
   int SizeArg = getSizeArg(I);
 
-
   switch (CallType) {
-  case Malloc:
-  case Realloc:{
-    if(SizeArg == -1) {
-    errs() << "error, size is -1\n";
-    return nullptr;
-  }
-    CallSite CS = CallSite(I);
-    Value* tempV = CS.getArgOperand(SizeArg);
-    return SE.getSCEV(tempV);
-  }
-  case Calloc: {
-    CallSite CS(I);
-    Value *NumElements = CS.getArgOperand(0);
-    Value *ElementSize = CS.getArgOperand(1);
-    return SE.getMulExpr(SE.getSCEV(NumElements), SE.getSCEV(ElementSize),
-                         SCEV::FlagNUW);
-  }
-  case Alloca: {
-    AllocaInst *AI = cast<AllocaInst>(I);
-    IntegerType *i64Ty = Type::getInt64Ty(AI->getContext());
-    const SCEV *Size = SE.getSizeOfExpr(i64Ty, AI->getAllocatedType());
+    case Malloc:
+    case Realloc: {
+      if (SizeArg == -1) {
+        errs() << "error, size is -1\n";
+        return nullptr;
+      }
+      CallSite CS = CallSite(I);
+      Value *tempV = CS.getArgOperand(SizeArg);
+      return SE.getSCEV(tempV);
+    }
+    case Calloc: {
+      CallSite CS(I);
+      Value *NumElements = CS.getArgOperand(0);
+      Value *ElementSize = CS.getArgOperand(1);
+      return SE.getMulExpr(SE.getSCEV(NumElements), SE.getSCEV(ElementSize),
+                           SCEV::FlagNUW);
+    }
+    case Alloca: {
+      AllocaInst *AI = cast<AllocaInst>(I);
+      IntegerType *i64Ty = Type::getInt64Ty(AI->getContext());
+      const SCEV *Size = SE.getSizeOfExpr(i64Ty, AI->getAllocatedType());
 
-    if (AI->isArrayAllocation())
-      Size = SE.getMulExpr(Size, SE.getSCEV(AI->getArraySize()), SCEV::FlagNUW);
+      if (AI->isArrayAllocation())
+        Size =
+            SE.getMulExpr(Size, SE.getSCEV(AI->getArraySize()), SCEV::FlagNUW);
 
-    return Size;
-  }
+      return Size;
+    }
   }
   return nullptr;
 }
 
 AllocationType getCallType(Instruction *I) {
-
   // if return None, the error occurs.
   AllocationType CallType;
 
-  if (isa<AllocaInst>(I)) 
-      CallType = AllocationType::Alloca;
-     
+  if (isa<AllocaInst>(I)) CallType = AllocationType::Alloca;
+
   if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
     llvm::CallSite CS(I);
     Function *F = CS.getCalledFunction();
@@ -325,14 +352,12 @@ int getSizeArg(Instruction *I) {
 
 int getSizeArg(Function *F) {
   const std::string &name = F->getName().str();
-  
+
   auto it = MallocFuncs.find(name);
-  if (it != MallocFuncs.end())
-    return it->second;
+  if (it != MallocFuncs.end()) return it->second;
 
   it = MallocWrappers.find(name);
-  if (it != MallocWrappers.end())
-    return it->second;
+  if (it != MallocWrappers.end()) return it->second;
   return -1;
 }
 
@@ -341,6 +366,23 @@ const SCEV *getGlobalSizeSCEV(GlobalVariable *GV, ScalarEvolution &SE) {
                           GV->getType()->getPointerElementType());
 }
 
+bool isMalloc(Instruction *I) {
+  if (!isAllocation(I)) return false;
+  if (CallInst *CI = dyn_cast<CallInst>(I)) {
+    Function *func = CI->getCalledFunction();
+    if (func->getName() == "malloc") return true;
+  }
+  return false;
+}
+
+bool isRealloc(Instruction *I) {
+  if (!isAllocation(I)) return false;
+  if (CallInst *CI = dyn_cast<CallInst>(I)) {
+    Function *func = CI->getCalledFunction();
+    if (func->getName() == "realloc") return true;
+  }
+  return false;
+}
 
 static void collectPHIOriginsRecursive(PHINode *PN,
                                        std::vector<Value *> &Origins,
@@ -348,8 +390,7 @@ static void collectPHIOriginsRecursive(PHINode *PN,
   for (unsigned I = 0, E = PN->getNumIncomingValues(); I < E; ++I) {
     Value *V = PN->getIncomingValue(I);
 
-    if (Visited.count(V) != 0)
-      continue;
+    if (Visited.count(V) != 0) continue;
     Visited.insert(V);
 
     ifcast(PHINode, IPN, V) collectPHIOriginsRecursive(IPN, Origins, Visited);
@@ -362,59 +403,104 @@ void collectPHIOrigins(PHINode *PN, std::vector<Value *> &Origins) {
   collectPHIOriginsRecursive(PN, Origins, Visited);
 }
 
-
-
-
-Value* createMask(IRBuilder<>& irb, Value* size, LLVMContext& ctx){
+Value *createMask(IRBuilder<> &irb, Value *size, LLVMContext &ctx) {
   // 초기화 전용
   // 이거 고쳐야됨
-  // 
+  //
   // 이거 반대로 하고 있음
   // 반대로 하는거만 고치면됨
-  // 그리고 생각해보니 처음에 초기화할 때는 
+  // 그리고 생각해보니 처음에 초기화할 때는
   // underflow를 보기위한 태그는 0으로 놔도 됨
-  ConstantInt* one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31));
-  Value* maskNoShift = irb.CreateSub(one, size, "sub");
-  //valuePrint(maskNoShift, "mask");
+  ConstantInt *one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31));
+  Value *maskNoShift = irb.CreateSub(one, size, "sub");
+  // valuePrint(maskNoShift, "mask");
+  return maskNoShift;
+}
+Constant *createConstantMask(Value *size, LLVMContext &ctx) {
+  Constant *consSize = dyn_cast<Constant>(size);
+  ConstantInt *one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31));
+  Constant *maskNoShift = ConstantExpr::getSub(one, consSize, "sub");
   return maskNoShift;
 }
 
-Value* getClearTagPointer(IRBuilder<>& irb, Value* MAllocP, std::string prefix){
-  std::string Prefix = std::string(MAllocP->getName())+"."+prefix;
-  unsigned long long clearAddress = (1ULL<<48)-1;
+Value *getClearTagPointer(IRBuilder<> &irb, Value *MAllocP,
+                          std::string prefix) {
+  std::string Prefix = std::string(MAllocP->getName()) + "." + prefix;
+  unsigned long long clearAddress = (1ULL << 48) - 1;
   clearAddress = (0x8080ULL << 48) | clearAddress;
-  ConstantInt* clearBit = ConstantInt::get(Type::getInt64Ty(irb.getContext()), clearAddress);
-  Value* IntPointer = irb.CreatePtrToInt(MAllocP, irb.getInt64Ty(), Prefix+".to.int");
-  Value* ClearInt = irb.CreateAnd(IntPointer, clearBit, Prefix+".and");
-  Value* ClearPointer = irb.CreateIntToPtr(ClearInt, MAllocP->getType(), Prefix+".clear");
+  ConstantInt *clearBit =
+      ConstantInt::get(Type::getInt64Ty(irb.getContext()), clearAddress);
+  Value *IntPointer =
+      irb.CreatePtrToInt(MAllocP, irb.getInt64Ty(), Prefix + ".to.int");
+  Value *ClearInt = irb.CreateAnd(IntPointer, clearBit, Prefix + ".and");
+  Value *ClearPointer =
+      irb.CreateIntToPtr(ClearInt, MAllocP->getType(), Prefix + ".clear");
   return ClearPointer;
 }
 
-void valuePrint(Value* value, std::string prefix){
-  if(!value) return;
-  errs() <<prefix<<": ";
+void valuePrint(Value *value, std::string prefix) {
+  if (!value) return;
+  errs() << prefix << ": ";
   value->print(errs());
-  errs() <<"\n";
+  errs() << "\n";
 }
 
-void instPrint(Instruction* inst, std::string prefix){
-  if(!inst) return;
-  errs() <<prefix<<": ";
+void instPrint(Instruction *inst, std::string prefix) {
+  if (!inst) return;
+  errs() << prefix << ": ";
   inst->print(errs());
-  errs() <<"\n";
+  errs() << "\n";
 }
-void typePrint(Type* type, std::string prefix){
+bool isFunctionPtrTy(Type *type) {
+  if (type->isPointerTy()) {
+    PointerType *ptrTy = dyn_cast<PointerType>(type);
+    return ptrTy->getPointerElementType()->isFunctionTy();
+  }
+  return false;
+}
+void typePrint(Type *type, std::string prefix) {
   assert(type);
-  
-  errs() <<prefix<<": ";
-  type->print(errs());
-  errs() <<"\n";
+  if (StructType *st = dyn_cast<StructType>(type)) {
+    errs() << prefix << ": ";
+    st->print(errs());
+    errs() << "{";
+    for (Type *stType : st->elements()) {
+      stType->print(errs());
+      errs() << " ";
+    }
+    errs() << "}\n";
+  } else if (PointerType *pt = dyn_cast<PointerType>(type)) {
+    errs() << prefix << ": *";
+    pt->getPointerElementType()->print(errs());
+    errs() << "\n";
+  } else {
+    errs() << prefix << ": ";
+    type->print(errs());
+    errs() << "\n";
+  }
 }
-
-bool isI128TypeEqual(Type* type){
+void deleteFunctionInst(Function &F) {
+  // F.print(errs());
+  for (Instruction &I : instructions(F)) {
+    // I.dropAllReferences();
+    if (Value *v = dyn_cast<Value>(&I)) {
+      for (Value *use : v->users()) {
+        valuePrint(use, "use");
+      }
+      v->dropDroppableUses();
+    }
+    I.dropAllReferences();
+    I.dropDroppableUses();
+  }
+  for (Instruction &I : instructions(F)) {
+    instPrint(&I, "I");
+    I.eraseFromParent();
+  }
+}
+bool isI128TypeEqual(Type *type) {
   typePrint(type, "Type: ");
-  if (type->isIntegerTy() ){
-    if(type->getIntegerBitWidth() == 128) return true;
+  if (type->isIntegerTy()) {
+    if (type->getIntegerBitWidth() == 128) return true;
   }
   return false;
 }

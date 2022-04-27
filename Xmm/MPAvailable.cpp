@@ -186,6 +186,62 @@ void MPAvailable::transformAlloc(Function& F) {
   }
 }
 
+void MPAvailable::createGlobalValue() {
+  Module& M = *this->module;
+  for (GlobalVariable& GV : M.getGlobalList()) {
+    if (GV.getType()->isFunctionTy()) continue;
+    if (GV.isConstant()) continue;
+    if (GlobalVariable::isLocalLinkage(GV.getLinkage())) {
+      if (Constant* initCons = GV.getInitializer()) {
+        Constant* nullXMM = Constant::getNullValue(XMM);
+        if (dyn_cast<PointerType>(initCons->getType())
+                ->getElementType()
+                ->isArrayTy()) {
+          Constant* addr = ConstantExpr::getBitCast(
+              initCons, IntegerType::getInt64Ty(M.getContext()));
+          unsigned int arrayIntSize = this->DL->getTypeAllocSize(
+              dyn_cast<PointerType>(initCons->getType())->getElementType());
+          Value* size = ConstantInt::get(
+              IntegerType::getInt64Ty(M.getContext()), arrayIntSize);
+          Constant* mask = createConstantMask(size, M.getContext());
+          Constant* vec1 =
+              ConstantExpr::getInsertElement(nullXMM, mask, (uint64_t)0);
+          Constant* vec2 =
+              ConstantExpr::getInsertElement(vec1, addr, (uint64_t)1);
+          GlobalVariable* gvar_ptr_abc = new GlobalVariable(
+              /*Module=*/M,
+              /*Type=*/XMM,
+              /*isConstant=*/false,
+              /*Linkage=*/GlobalValue::InternalLinkage,
+              /*Initializer=*/vec2,  // has initializer, specified below
+              /*Name=*/GV.getName() + "_XMM");
+          gToGV[&GV] = gvar_ptr_abc;
+        } else if (GV.getType()->isPointerTy()) {
+          if (Constant* initCons = GV.getInitializer()) {
+          } else {
+            GlobalVariable* gvar_ptr_abc = new GlobalVariable(
+                /*Module=*/M,
+                /*Type=*/XMM,
+                /*isConstant=*/false,
+                /*Linkage=*/GlobalValue::InternalLinkage,
+                /*Initializer=*/0,  // has initializer, specified below
+                /*Name=*/GV.getName() + "_XMM");
+            gToGV[&GV] = gvar_ptr_abc;
+          }
+        }
+
+        ConstantExpr::getInsertElement();
+        GlobalVariable* gvar_ptr_abc = new GlobalVariable(
+            /*Module=*/M,
+            /*Type=*/XMM,
+            /*isConstant=*/false,
+            /*Linkage=*/GlobalValue::InternalLinkage,
+            /*Initializer=*/0,  // has initializer, specified below
+            /*Name=*/"abc");
+      }
+    }
+  }
+}
 bool MPAvailable::runOnModule(Module& M) {
   DL = &M.getDataLayout();
   errs() << "Run On Module\n";
@@ -1449,25 +1505,46 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
       case Instruction::Alloca: {
         // PASS
         AllocaInst* allocaInst = dyn_cast<AllocaInst>(&I);
+        if (allocaInst->getName() == "saved_stack") {
+          Instruction* newInst = I.clone();
+          valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
+          clone->getInstList().push_back(newInst);
+          break;
+        }
         if (isFunctionPtrTy(allocaInst->getAllocatedType())) {
           Instruction* newInst = I.clone();
           valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
           clone->getInstList().push_back(newInst);
         } else if (allocaInst->getAllocatedType()->isPointerTy()) {
           if (allocaInst->isArrayAllocation()) {
-            Value* size = allocaInst->getArraySize();
-            Value* newSize = valToVal.count(size) > 0 ? valToVal[size] : size;
-            Value* replace = irb.CreateAlloca(XMM, newSize, I.getName());
-            valToVal[dyn_cast<Value>(&I)] = replace;
+            Value* size = instrumentWithByteSize(irb, &I, valToVal);
+
+            Value* newPointer =
+                irb.CreateAlloca(XMM, nullptr, I.getName().str() + ".l4");
+            Value* newArray = irb.CreateAlloca(allocaInst->getAllocatedType(),
+                                               size, allocaInst->getName());
+            Value* OvSz = createMask(irb, size, irb.getContext());
+            Value* PtrInt = irb.CreatePtrToInt(newArray, irb.getInt64Ty());
+            Value* emptyVec = Constant::getNullValue(XMM);
+
+            Value* vec0 = irb.CreateInsertElement(emptyVec, OvSz, (uint64_t)0);
+            Value* vec1 = irb.CreateInsertElement(vec0, PtrInt, 1);
+
+            irb.CreateStore(vec1, newPointer);
+            valToVal[dyn_cast<Value>(&I)] = newPointer;
+            arrToPtr[dyn_cast<Value>(&I)] = newPointer;
           } else {
             Value* replace = irb.CreateAlloca(XMM, nullptr, I.getName());
             valToVal[dyn_cast<Value>(&I)] = replace;
           }
         } else if (allocaInst->getAllocatedType()->isArrayTy()) {
-          Value* newPointer =
-              irb.CreateAlloca(XMM, nullptr, I.getName().str() + ".l4");
           Value* newArray = irb.CreateAlloca(allocaInst->getAllocatedType(),
                                              nullptr, allocaInst->getName());
+
+          Value* newPointer =
+              irb.CreateAlloca(XMM, nullptr, I.getName().str() + ".l4.arrayty");
+          AllocaInst* newAI = dyn_cast<AllocaInst>(newArray);
+          newAI->setAlignment(allocaInst->getAlign());
 
           Type* type = allocaInst->getAllocatedType();
           ArrayType* arrType = dyn_cast<ArrayType>(type);
@@ -1485,13 +1562,14 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
           irb.CreateStore(vec1, newPointer);
           valToVal[dyn_cast<Value>(&I)] = newPointer;
-
+          arrToPtr[dyn_cast<Value>(&I)] = newPointer;
         } else if (allocaInst->isArrayAllocation()) {
-          Value* size = allocaInst->getArraySize();
+          Value* size = instrumentWithByteSize(irb, &I, valToVal);
+
           Value* newPointer =
               irb.CreateAlloca(XMM, nullptr, I.getName().str() + ".l4");
           Value* newArray = irb.CreateAlloca(allocaInst->getAllocatedType(),
-                                             nullptr, allocaInst->getName());
+                                             size, allocaInst->getName());
           Value* OvSz = createMask(irb, size, irb.getContext());
           Value* PtrInt = irb.CreatePtrToInt(newArray, irb.getInt64Ty());
           Value* emptyVec = Constant::getNullValue(XMM);
@@ -1501,6 +1579,7 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
           irb.CreateStore(vec1, newPointer);
           valToVal[dyn_cast<Value>(&I)] = newPointer;
+          arrToPtr[dyn_cast<Value>(&I)] = newPointer;
         } else {
           Instruction* newInst = I.clone();
           valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
@@ -1526,9 +1605,9 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               break;
             }
             if (AllocaInst* newAI = dyn_cast<AllocaInst>(I.getOperand(1))) {
-              Value* ptr = cloneFunc->getArg(index);
+              Value* tag = cloneFunc->getArg(index);
 
-              Value* tag = cloneFunc->getArg(index + 1);
+              Value* ptr = cloneFunc->getArg(index + 1);
               Value* nullL4 = Constant::getNullValue(XMM);
               Value* tagVec = irb.CreateInsertElement(nullL4, tag, (uint64_t)0);
               Value* ptrToInt =
@@ -1538,9 +1617,9 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               Instruction* inst = dyn_cast<Instruction>(v1);
               irb.CreateStore(L4, v1);
             } else if (isXMMPtrTy(v1->getType())) {
-              Value* ptr = cloneFunc->getArg(index);
+              Value* tag = cloneFunc->getArg(index);
 
-              Value* tag = cloneFunc->getArg(index + 1);
+              Value* ptr = cloneFunc->getArg(index + 1);
               Value* nullL4 = Constant::getNullValue(XMM);
               Value* tagVec = irb.CreateInsertElement(nullL4, tag, (uint64_t)0);
               Value* ptrToInt =
@@ -1550,12 +1629,12 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               Instruction* inst = dyn_cast<Instruction>(v1);
               irb.CreateStore(L4, v1);
             } else if (isXMMTy(v1->getType())) {
-              Value* ptr = cloneFunc->getArg(index);
+              Value* ptr = cloneFunc->getArg(index + 1);
               Value* newV1 = ununTag(v1, I.getOperand(1)->getType(), irb);
               irb.CreateStore(ptr, newV1);
             } else {
               // v1 is pointer Ty;
-              Value* ptr = cloneFunc->getArg(index);
+              Value* ptr = cloneFunc->getArg(index + 1);
 
               Value* intToPtr = irb.CreateIntToPtr(
                   ptr, v1->getType()->getPointerElementType());
@@ -1615,12 +1694,7 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
                     ununTag(newValue, I.getOperand(0)->getType(), irb);
                 irb.CreateStore(replaceValue, newPointer);
               } else {
-                instPrint(&I, "I");
-                valuePrint(newValue, "newValue");
-                valuePrint(newPointer, "newPinter");
                 StoreInst* si = irb.CreateStore(newValue, newPointer);
-                if (cloneFunc->getName() == "Wrapping_hashtable_create")
-                  instPrint(si, "si");
               }
             }
           }
@@ -1634,8 +1708,7 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
           if (GlobalValue* gv = dyn_cast_or_null<GlobalValue>(ptr)) {
             Value* value = si->getValueOperand();
             Value* newValue = valToVal.count(value) ? valToVal[value] : value;
-            valuePrint(ptr, "test");
-            valuePrint(newValue, "test");
+
             if (isXMMTy(newValue->getType())) {
               newValue = ununTag(newValue, value->getType(), irb);
             }
@@ -1748,8 +1821,8 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
                 Value* v1 = irb.CreateInsertElement(v0, offset, 1);
                 Value* replaceInst =
                     irb.CreateAdd(l4Ptr, v1,
-                                  gep->hasName() ? gep->getName()
-                                                 : l4Ptr->getName() + ".idx");
+                                  gep->hasName() ? gep->getName() + ".array"
+                                                 : l4Ptr->getName() + ".array");
                 valToVal[dyn_cast<Value>(&I)] = replaceInst;
               } else {
                 std::vector<Value*> plist;
@@ -1776,27 +1849,46 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               }
             }
           } else if (base->getType()->getPointerElementType()->isArrayTy()) {
-            if (gep->isInBounds()) {
-              Value* newBase = valToVal[base];
-              std::vector<Value*> plist;
-              for (auto i = gep->idx_begin(); i != gep->idx_end(); i++) {
-                Value* val = *i;
-                Type* type = gep->getTypeAtIndex(
-                    cast<PointerType>(
-                        gep->getPointerOperand()->getType()->getScalarType())
-                        ->getElementType(),
-                    val);
-                if (valToVal.count(val) > 0)
-                  plist.push_back(valToVal[val]);
-                else
-                  plist.push_back(val);
-              }
+            if (arrToPtr.count(base)) {
+              Value* wrapPtr = arrToPtr[base];
+              Value* l4Ptr = irb.CreateLoad(wrapPtr);
+              Value* unWrapPtr = ununTag(l4Ptr, base->getType(), irb);
 
-              Value* newGEP = irb.CreateInBoundsGEP(newBase, plist, "ARRAY");
-              assertGEP(newGEP);
-              valToVal[dyn_cast<Value>(gep)] = newGEP;
+              Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
+
+              Constant* nullVec = Constant::getNullValue(XMM);
+              Value* tag = createOffsetMask(irb, offset);
+              Value* v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
+              Value* v1 = irb.CreateInsertElement(v0, offset, 1);
+              Value* replaceInst =
+                  irb.CreateAdd(l4Ptr, v1,
+                                gep->hasName() ? gep->getName() + ".array"
+                                               : l4Ptr->getName() + ".array");
+              valToVal[dyn_cast<Value>(&I)] = replaceInst;
+            } else {
+              if (gep->isInBounds()) {
+                Value* newBase = valToVal[base];
+                std::vector<Value*> plist;
+                for (auto i = gep->idx_begin(); i != gep->idx_end(); i++) {
+                  Value* val = *i;
+                  Type* type = gep->getTypeAtIndex(
+                      cast<PointerType>(
+                          gep->getPointerOperand()->getType()->getScalarType())
+                          ->getElementType(),
+                      val);
+                  if (valToVal.count(val) > 0)
+                    plist.push_back(valToVal[val]);
+                  else
+                    plist.push_back(val);
+                }
+
+                Value* newGEP = irb.CreateInBoundsGEP(newBase, plist, "ARRAY");
+                assertGEP(newGEP);
+                valToVal[dyn_cast<Value>(gep)] = newGEP;
+              }
             }
-          } else if (AllocaInst* ai = dyn_cast<AllocaInst>(valToVal[base])) {
+
+          } else if (AllocaInst* ai = dyn_cast<AllocaInst>(base)) {
             if (ai->getAllocatedType()->isArrayTy()) {
               Value* wrapPtr = arrToPtr[base];
               Value* l4Ptr = irb.CreateLoad(wrapPtr);
@@ -1808,14 +1900,14 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               Value* tag = createOffsetMask(irb, offset);
               Value* v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
               Value* v1 = irb.CreateInsertElement(v0, offset, 1);
-              Value* replaceInst = irb.CreateAdd(
-                  l4Ptr, v1,
-                  gep->hasName() ? gep->getName() : l4Ptr->getName() + ".idx");
+              Value* replaceInst =
+                  irb.CreateAdd(l4Ptr, v1,
+                                gep->hasName() ? gep->getName() + ".array"
+                                               : l4Ptr->getName() + ".array");
               valToVal[dyn_cast<Value>(&I)] = replaceInst;
             } else if (ai->isArrayAllocation()) {
               Value* wrapPtr = arrToPtr[base];
               Value* l4Ptr = irb.CreateLoad(wrapPtr);
-              Value* unWrapPtr = ununTag(l4Ptr, base->getType(), irb);
 
               Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
 
@@ -1837,7 +1929,6 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
             if (isXMMPtrTy(newBase->getType())) {
               Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
-              valuePrint(offset, "offset");
               Value* ConstOffset = nullptr;
               bool isPositive = hasNegativeOffset(gep);
 
@@ -1968,7 +2059,24 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
             Value* arg = CI->getArgOperand(i);
             if (valToVal.count(arg) > 0) {
               Value* newArg = valToVal[arg];
-              if (isXMMTy(newArg->getType())) {
+              if (isXMMPtrTy(newArg->getType())) {
+                if (arrToPtr.count(arg) > 0) {
+                  Value* wrapPtr = arrToPtr[arg];
+                  Value* l4Ptr = irb.CreateLoad(wrapPtr);
+                  Value* unWrapPtr = ununTag(l4Ptr, arg->getType(), irb);
+                  CI->setArgOperand(i, unWrapPtr);
+
+                } else {
+                  Value* ptr = irb.CreateBitCast(
+                      newArg, irb.getInt64Ty()->getPointerTo());
+                  Value* idx = ConstantInt::get(irb.getInt64Ty(), 1);
+                  Value* newPtr =
+                      irb.CreateInBoundsGEP(irb.getInt64Ty(), ptr, idx);
+                  Value* newInsertArg =
+                      irb.CreateBitCast(newPtr, arg->getType(), "HERE");
+                  CI->setArgOperand(i, newInsertArg);
+                }
+              } else if (isXMMTy(newArg->getType())) {
                 Value* newXMM = ununTag(newArg, arg->getType(), tempIRB);
                 CI->setArgOperand(i, newXMM);
               } else
@@ -2005,15 +2113,22 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
                   // } else {
                   //   // not array
                   // }
-                  instPrint(&I, "Problem");
-                  valuePrint(newArg, "newArg");
-                  std::list<Value*> plist;
-                  Value* idx = ConstantInt::get(irb.getInt64Ty(), 1);
-                  // Value* newPtr = irb.CreateInBoundsGEP(
-                  //     irb.getInt64Ty()->getPointerTo(), newArg, idx);
-                  IRBuilder<> tempIRB(getInsertPointBefore(CI));
-                  Value* newPtr = tempIRB.CreateBitCast(newArg, arg->getType());
-                  CI->setArgOperand(i, newPtr);
+
+                  if (arrToPtr.count(arg) > 0) {
+                    Value* wrapPtr = arrToPtr[arg];
+                    Value* l4Ptr = tempIRB.CreateLoad(wrapPtr);
+                    Value* unWrapPtr = ununTag(l4Ptr, arg->getType(), tempIRB);
+                    CI->setArgOperand(i, unWrapPtr);
+                  } else {
+                    std::list<Value*> plist;
+                    Value* idx = ConstantInt::get(irb.getInt64Ty(), 1);
+                    // Value* newPtr = irb.CreateInBoundsGEP(
+                    //     irb.getInt64Ty()->getPointerTo(), newArg, idx);
+                    IRBuilder<> tempIRB(getInsertPointBefore(CI));
+                    Value* newPtr =
+                        tempIRB.CreateBitCast(newArg, arg->getType(), "HERE2");
+                    CI->setArgOperand(i, newPtr);
+                  }
                 } else
                   CI->setArgOperand(i, newArg);
               }
@@ -2044,7 +2159,8 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
 
               Value* vec0 =
                   irb.CreateInsertElement(emptyVec, OvSz, (uint64_t)0);
-              Value* vec1 = irb.CreateInsertElement(vec0, PtrInt, 1);
+              Value* vec1 =
+                  irb.CreateInsertElement(vec0, PtrInt, 1, "malloc.result");
               valToVal[dyn_cast<Value>(&I)] = vec1;
             } else if (isRealloc(callee)) {
               // 여기서 스토어까지 다해야됨
@@ -2098,8 +2214,8 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
                           ? irb.CreatePtrToInt(newArg, irb.getInt64Ty())
                           : irb.CreateBitCast(newArg, irb.getInt64Ty());
                   Value* tag = ConstantInt::get(irb.getInt64Ty(), 0);
-                  plist.push_back(ptr);
                   plist.push_back(tag);
+                  plist.push_back(ptr);
                 }
               } else {
                 Value* newArg;
@@ -2111,9 +2227,9 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
                 } else
                   newArg = irb.CreatePtrToInt(arg, irb.getInt64Ty());
 
-                plist.push_back(newArg);
                 Value* nullValue = Constant::getNullValue(irb.getInt64Ty());
                 plist.push_back(nullValue);
+                plist.push_back(newArg);
                 // 여기서는 포인터에 원래값
                 // 태그에는 널 넣기
               }
@@ -2177,7 +2293,7 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
         // If it is for malloc instruction, it should be deleted.
         // L4 pointer don't need bitcast instruction.
         // 그냥 배열일때 필요함, 하아 이걸 어떻게 고치나...
-
+        instPrint(&I, "BCI");
         if (valToVal.count(I.getOperand(0)) > 0) {
           if (isAllocation(getInsertPointBefore(&I))) {
             if (isMalloc(getInsertPointBefore(&I)))
@@ -2188,34 +2304,45 @@ BasicBlock* MPAvailable::cloneBB(Function* cloneFunc, BasicBlock* orig,
               clone->getInstList().push_back(newInst);
               valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
             }
+            errs() << "HERE1\n";
+            break;
           }
           BitCastInst* bci = dyn_cast<BitCastInst>(&I);
 
           Value* op = valToVal[I.getOperand(0)];
-          if (PointerType* pointerType =
-                  dyn_cast<PointerType>(bci->getDestTy())) {
-            if (pointerType->getPointerElementType()->isStructTy()) {
-              StructType* st =
-                  dyn_cast<StructType>(pointerType->getPointerElementType());
-              StructType* newSt = st;
-              Value* newOp = op;
-              if (isXMMTy(op->getType()))
-                newOp = ununTag(op, I.getOperand(0)->getType(), irb);
+          // if (PointerType* pointerType =
+          //         dyn_cast<PointerType>(bci->getDestTy())) {
+          //   if (pointerType->getPointerElementType()->isStructTy()) {
+          //     StructType* st =
+          //         dyn_cast<StructType>(pointerType->getPointerElementType());
+          //     StructType* newSt = st;
+          //     Value* newOp = op;
+          //     if (isXMMTy(op->getType()))
+          //       newOp = ununTag(op, I.getOperand(0)->getType(), irb);
 
-              Value* newInst = irb.CreateBitCast(newOp, newSt->getPointerTo());
-              valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
-              break;
-            }
-          }
+          //     Value* newInst = irb.CreateBitCast(newOp,
+          //     newSt->getPointerTo()); valToVal[dyn_cast<Value>(&I)] =
+          //     dyn_cast<Value>(newInst); break;
+          //   }
+          // }
           if (isXMMTy(op->getType())) {
             Value* newOp = ununTag(op, I.getOperand(0)->getType(), irb);
             Instruction* newInst = I.clone();
             clone->getInstList().push_back(newInst);
             newInst->setOperand(0, newOp);
+            newInst->setName("WHY");
             valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
+            errs() << "HERE2\n";
+          } else if (isXMMPtrTy(op->getType())) {
+            valToVal[&I] = op;
+            arrToPtr[&I] = op;
+            errs() << "HERE3\n";
+            break;
           } else {
             Instruction* newInst = I.clone();
-            newInst->setName(I.getName());
+            errs() << "HERE4\n";
+
+            newInst->setName("HEREBITCAST");
             newInst->setOperand(0, op);
             clone->getInstList().push_back(newInst);
             valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
@@ -2468,7 +2595,7 @@ void MPAvailable::createWrappingMain(Function& F) {
 
           // 여기서 포인터에 저장까지 하자
 
-          Value* allocSize = alloca->getArraySize();
+          Value* allocSize = instrumentWithByteSize(irb, &I, valToVal);
 
           Value* OvSz = createMask(irb, allocSize, irb.getContext());
           Value* PtrInt = irb.CreatePtrToInt(alloca, irb.getInt64Ty());
@@ -2528,7 +2655,6 @@ void MPAvailable::createWrappingMain(Function& F) {
               irb.CreateAlloca(XMM, nullptr, alloca->getName() + ".xmm");
           valToVal[dyn_cast<Value>(&I)] = newVal;
           continueList.insert(dyn_cast<Instruction>(newVal));
-          instPrint(&I, "WILLBEDELTED");
           willBeDeletedInsts.insert(&I);
         }
         break;
@@ -2602,8 +2728,10 @@ void MPAvailable::createWrappingMain(Function& F) {
       }
       case Instruction::Load: {
         Value* ptr = I.getOperand(0);
+        valuePrint(ptr, "ptr:");
         if (valToVal.count(ptr) > 0) {
           IRBuilder<> irb(&I);
+          valuePrint(valToVal[ptr], "valtoval");
           Value* newPtr = valToVal[ptr];
           if (isXMMTy(newPtr->getType())) {
             Value* unwrapPtr = ununTag(newPtr, ptr->getType(), irb, "load");
@@ -2621,9 +2749,12 @@ void MPAvailable::createWrappingMain(Function& F) {
       case Instruction::Call: {
         CallInst* CI = dyn_cast<CallInst>(&I);
         Function* callee = CI->getCalledFunction();
-
+        errs() << "What the Fuck?\n";
+        instPrint(CI, "What the fuk");
         if (!callee) {
           // if callee is null, callee is declaration.
+          instPrint(CI, "use CI? NULL?");
+
           IRBuilder<> irb(CI);
           for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
             Value* arg = CI->getArgOperand(i);
@@ -2632,6 +2763,24 @@ void MPAvailable::createWrappingMain(Function& F) {
               if (isXMMTy(newArg->getType())) {
                 Value* newXMM = ununTag(newArg, arg->getType(), irb, "call");
                 CI->setArgOperand(i, newXMM);
+              } else if (isXMMPtrTy(newArg->getType())) {
+                if (arrToPtr.count(arg) > 0) {
+                  Value* wrapPtr = arrToPtr[arg];
+                  Value* l4Ptr = irb.CreateLoad(wrapPtr);
+                  Value* unWrapPtr = ununTag(l4Ptr, arg->getType(), irb);
+                  CI->setArgOperand(i, unWrapPtr);
+                } else {
+                  std::list<Value*> plist;
+                  Value* idx = ConstantInt::get(irb.getInt64Ty(), 1);
+                  // Value* newPtr = irb.CreateInBoundsGEP(
+                  //     irb.getInt64Ty()->getPointerTo(), newArg, idx);
+                  IRBuilder<> tempIRB(getInsertPointBefore(CI));
+                  Value* newPtr =
+                      irb.CreateBitCast(newArg, arg->getType(), "HERE2");
+                  CI->setArgOperand(i, newPtr);
+                }
+              } else {
+                CI->setArgOperand(i, newArg);
               }
             }
           }
@@ -2640,9 +2789,11 @@ void MPAvailable::createWrappingMain(Function& F) {
           // 포인터들 다 언랩핑하기
           // 여기서는 오퍼랜드만 교체하기
           IRBuilder<> irb(CI);
+          instPrint(CI, "use CI?");
           for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
             Value* arg = CI->getArgOperand(i);
             if (valToVal.count(arg) > 0) {
+              valuePrint(arg, "arg");
               Value* newArg = valToVal[arg];
               if (isXMMTy(newArg->getType())) {
                 Value* newXMM = ununTag(newArg, arg->getType(), irb);
@@ -2653,12 +2804,14 @@ void MPAvailable::createWrappingMain(Function& F) {
                     Value* wrapPtr = arrToPtr[arg];
                     Value* l4Ptr = irb.CreateLoad(wrapPtr);
                     Value* unWrapPtr = ununTag(l4Ptr, arg->getType(), irb);
+                    CI->setArgOperand(i, unWrapPtr);
+
                   } else {
                     Value* ptr = irb.CreateBitCast(
                         newArg, irb.getInt64Ty()->getPointerTo());
                     Value* idx = ConstantInt::get(irb.getInt64Ty(), 1);
-                    Value* newPtr =
-                        irb.CreateInBoundsGEP(irb.getInt64Ty(), ptr, idx);
+                    Value* newPtr = irb.CreateInBoundsGEP(irb.getInt64Ty(), ptr,
+                                                          idx, "test");
                     Value* newInsertArg =
                         irb.CreateBitCast(newPtr, arg->getType());
                     CI->setArgOperand(i, newInsertArg);
@@ -2793,10 +2946,10 @@ void MPAvailable::createWrappingMain(Function& F) {
                 }
               } else {
                 Value* newArg = irb.CreatePtrToInt(arg, irb.getInt64Ty());
-                plist.push_back(newArg);
                 // if
                 Value* nullValue = Constant::getNullValue(irb.getInt64Ty());
                 plist.push_back(nullValue);
+                plist.push_back(newArg);
                 // 여기서는 포인터에 원래값
                 // 태그에는 널 넣기
               }
@@ -2813,6 +2966,16 @@ void MPAvailable::createWrappingMain(Function& F) {
           Value* newVal = irb.CreateCall(newCallee, plist, I.getName());
           valToVal[dyn_cast<Value>(&I)] = newVal;
           willBeDeletedInsts.insert(&I);
+        } else if (!callee->isDeclaration()) {
+          // if callee is normal function (param are not pointerty.) and not
+          // declaration function!
+          for (unsigned int i = 0; i < CI->getNumArgOperands(); i++) {
+            Value* arg = CI->getArgOperand(i);
+            if (valToVal.count(arg) > 0) {
+              Value* newArg = valToVal[arg];
+              CI->setArgOperand(i, newArg);
+            }
+          }
         }
         break;
       }
@@ -2853,12 +3016,11 @@ void MPAvailable::createWrappingMain(Function& F) {
         GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(&I);
         Value* base = gep->getPointerOperand();
         instPrint(gep, "gep");
+        valuePrint(base, "base");
         if (valToVal.count(base) > 0) {
-          instPrint(gep, "targetGEP");
           Value* newBase = valToVal[base];
           if (isXMMTy(newBase->getType())) {
             Value* offset = emitGEPOffset(irb, *DL, gep, valToVal);
-            valuePrint(offset, "offset");
             Value* ConstOffset = nullptr;
             bool isPositive = hasNegativeOffset(gep);
 
@@ -2875,7 +3037,6 @@ void MPAvailable::createWrappingMain(Function& F) {
             willBeDeletedInsts.insert(&I);
           } else if (AllocaInst* ai = dyn_cast<AllocaInst>(base)) {
             if (ai->getAllocatedType()->isArrayTy()) {
-              errs() << "ARRAY\n";
               Value* wrapPtr = arrToPtr[base];
               Value* l4Ptr = irb.CreateLoad(wrapPtr);
               Value* unWrapPtr = ununTag(l4Ptr, base->getType(), irb);
@@ -3066,16 +3227,27 @@ void MPAvailable::createWrappingMain(Function& F) {
   std::vector<Instruction*> workList(willBeDeletedInsts.begin(),
                                      willBeDeletedInsts.end());
 
+  int size = workList.size();
+  int counter = 0;
   while (!workList.empty()) {
+    if (size == workList.size())
+      counter++;
+    else {
+      counter = 0;
+      size = workList.size();
+    }
+    if (counter > 100) {
+      errs() << "infinit roop";
+      exit(1);
+    }
     Instruction* inst = workList.front();
-    // instPrint(inst, "erase inst");
     if (inst->users().empty()) {
       workList.erase(workList.begin());
       inst->eraseFromParent();
     } else {
-      for (Value* user : inst->users()) {
-        // valuePrint(user, "user");
-      }
+      // for (Value* user : inst->users()) {
+      //   valuePrint(user, "user");
+      // }
       workList.erase(workList.begin());
       workList.push_back(inst);
     }
@@ -3160,8 +3332,10 @@ Value* MPAvailable::instrumentWithByteSize(IRBuilder<>& B, Instruction* I,
     case Alloca: {
       AllocaInst* AI = cast<AllocaInst>(I);
       Value* Size = B.getInt64(DL->getTypeAllocSize(AI->getAllocatedType()));
-
-      if (AI->isArrayAllocation()) Size = B.CreateMul(Size, AI->getArraySize());
+      Value* arraySize = valToVal.count(AI->getArraySize()) > 0
+                             ? valToVal[AI->getArraySize()]
+                             : AI->getArraySize();
+      if (AI->isArrayAllocation()) Size = B.CreateMul(Size, arraySize);
 
       return Size;
     }
