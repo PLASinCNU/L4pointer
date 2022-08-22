@@ -40,9 +40,15 @@ static std::set<std::string> ExternStruct = {"struct._IO_FILE",
 bool isExternalStruct(std::string name) { return ExternStruct.count(name) > 0; }
 bool isUsedFunctionPointer(Function *F) {
   for (Value *val : F->users()) {
-    if (!isa<ConstantExpr>(val)) return false;
+    if (CallInst *CI = dyn_cast<CallInst>(val)) {
+      if (CI->getCalledFunction() == F)
+        continue;
+      else  // Operand 의 인자로 쓰였다는 뜻, 함수포인터로 인자가 넘어간 경우
+        return true;
+    } else
+      return true;
   }
-  return true;
+  return false;
 }
 bool isAllUseSelf(Function *F) {
   if (F->doesNotRecurse()) return false;
@@ -54,6 +60,34 @@ bool isAllUseSelf(Function *F) {
     }
   }
   return true;
+}
+
+void deleteFunction(Function *F) {
+  // errs() << F->getName() << "\n";
+
+  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E;) {
+    inst_iterator vI = I;
+    I++;
+
+    vI->replaceAllUsesWith(UndefValue::get(vI->getType()));
+    vI->eraseFromParent();
+  }
+  for (Value *use : F->users()) {
+    if (ConstantExpr *cExpr = dyn_cast<ConstantExpr>(use)) {
+      cExpr->replaceAllUsesWith(UndefValue::get(cExpr->getType()));
+      cExpr->destroyConstant();
+    }
+  }
+}
+void traceUses(Function *F) {
+  errs() << "Function User : " << F->getName() << "\n";
+  for (Value *v : F->users()) {
+    valuePrint(v, "User: ");
+    if (Instruction *I = dyn_cast<Instruction>(v)) {
+      errs() << "User's parent : " << I->getParent()->getParent()->getName()
+             << "\n";
+    }
+  }
 }
 static std::map<std::string, int> MallocWrappers = {
     /* custom pool allocators
@@ -411,8 +445,13 @@ Value *createMask(IRBuilder<> &irb, Value *size, LLVMContext &ctx) {
   // 반대로 하는거만 고치면됨
   // 그리고 생각해보니 처음에 초기화할 때는
   // underflow를 보기위한 태그는 0으로 놔도 됨
+  Value *op = size;
   ConstantInt *one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31));
-  Value *maskNoShift = irb.CreateSub(one, size, "sub");
+  if (size->getType()->getIntegerBitWidth() != 64) {
+    op = irb.CreateZExt(size, Type::getInt64Ty(ctx));
+  }
+  valuePrint(op, "op");
+  Value *maskNoShift = irb.CreateSub(one, op, "sub");
   // valuePrint(maskNoShift, "mask");
   return maskNoShift;
 }
@@ -458,17 +497,25 @@ bool isFunctionPtrTy(Type *type) {
   }
   return false;
 }
+
+bool isFunctionPtrPtrTy(Type *type) {
+  if (type->isPointerTy()) {
+    PointerType *ptrTy = dyn_cast<PointerType>(type);
+    if (ptrTy->getPointerElementType()->isPointerTy()) {
+      PointerType *ptrPtrTy =
+          dyn_cast<PointerType>(ptrTy->getPointerElementType());
+      return ptrPtrTy->getPointerElementType()->isFunctionTy();
+    }
+  }
+  return false;
+}
 void typePrint(Type *type, std::string prefix) {
   assert(type);
   if (StructType *st = dyn_cast<StructType>(type)) {
     errs() << prefix << ": ";
     st->print(errs());
-    errs() << "{";
-    for (Type *stType : st->elements()) {
-      stType->print(errs());
-      errs() << " ";
-    }
-    errs() << "}\n";
+    errs() << "\n";
+
   } else if (PointerType *pt = dyn_cast<PointerType>(type)) {
     errs() << prefix << ": *";
     pt->getPointerElementType()->print(errs());
@@ -479,6 +526,7 @@ void typePrint(Type *type, std::string prefix) {
     errs() << "\n";
   }
 }
+
 void deleteFunctionInst(Function &F) {
   // F.print(errs());
   for (Instruction &I : instructions(F)) {

@@ -1,3 +1,4 @@
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/TinyPtrVector.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ScalarEvolution.h>
@@ -44,10 +45,11 @@ class MPAvailable : public ModulePass {
   DenseMap<GetElementPtrInst*, ConstantInt*>
       gepToOffset;  // offset이 constant로 나올 경우
 
-  // DenseMap<StructType*, StructType*> strucTyToStructTy;
+  DenseMap<StructType*, StructType*> strucTyToStructTy;
   DenseMap<GetElementPtrInst*, bool> gepToPositive;
   DenseMap<Function*, Function*> funcToFunc;
   DenseSet<Value*> TagPtrOrigin;
+  DenseSet<CallInst*> doublePtrMallocs;
   DenseSet<Instruction*> AllocMpUses;
   DenseSet<Instruction*> NonAllocMp;
   DenseSet<Instruction*> willBeRemoveSet;
@@ -59,6 +61,7 @@ class MPAvailable : public ModulePass {
   DenseSet<Function*> transformFunctions;
   DenseSet<Function*> wrappingFunctions;
   DenseSet<Function*> willBeDeletedFunctions;
+  DenseSet<Function*> usedFunctions;
   DenseSet<ConstantExpr*> checks;
 
   DenseSet<Instruction*>
@@ -76,27 +79,30 @@ class MPAvailable : public ModulePass {
   SafeL4Alloc* L4Alloc;
   VectorType* XMM;
   PointerType* XMM_POINTER;
+  Constant* constantNullXMM;
   // SymbolicRangeAnalysis *SRA;
 
   Function* AddWithOverflowFunc;
+  FunctionCallee printFunction;
 
   void transformAlloc(Function& F);
   bool isXMMPtrTy(Type* type);
   void getAnalysisUsage(AnalysisUsage& AU) const override;
-
+  void findDoublePtrMalloc(Function& F);
   void createXmmStructTy(Module& M);
   BasicBlock* cloneBB(Function* cloneFunc, BasicBlock* orig,
                       std::map<StringRef, int>& argToArg,
                       std::map<Value*, Value*>& valToVal,
                       std::map<Value*, Value*>& arrToPtr);
 
-  // void replaceStructTy(Module& M ); //  이 함수에서는 그냥 struct 타입에
+  void replaceStructTy(Module& M);  //  이 함수에서는 그냥 struct 타입에
   // 대해서만 바꿔줌, 그리고 gep 쪼개기 void replaceStructTyInFunction(Function&
   // F ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep
   // 쪼개기
+  void replaceStructTyInFunction(Function& F);
   std::set<StructType*> transStructs;
 
-  // StructType* createStructureType(StructType* st);
+  StructType* createStructureType(StructType* st);
   void replaceFunction(Function* newFunc, Function* oldFunc);
   void eraseFunction(Function* function);
   void eraseRemoveInstruction();
@@ -130,11 +136,17 @@ class MPAvailable : public ModulePass {
 
   void propagateTagModule(Module& M);
   void propagateTAg(Function& F);
-
+  FunctionType* createFunctionType(FunctionType* ft);
   void verifyModule(Module& M);
-
+  std::vector<Value*> getCallArgs(CallInst* CI, FunctionType* ft,
+                                  std::map<Value*, Value*>& valToVal,
+                                  IRBuilder<>& irb);
   void initFunction(Module& M);
-
+  bool fixParamAllocInst(Instruction& I, std::map<Value*, Value*>& valToVal,
+                         IRBuilder<>& irb, bool isNeededNewInst = false);
+  bool fixGEPforStruct(GetElementPtrInst* gep,
+                       std::map<Value*, Value*>& valToVal, IRBuilder<>& irb,
+                       bool needReplace = false);
   void transFormation(Function* F);
 
   void transFunction(Module& M);
@@ -143,7 +155,7 @@ class MPAvailable : public ModulePass {
   void replaceAll(Value* orig, Value* replacer);
 
   void analyzeGEPforFunction(Function& F);
-  void splatGEP(Instruction* I);
+  void verifyGlobalValue(Module& M);
 
   // if CalledFunction is declared, pointer should be unwrapped
   // 이렇게 하는 이유 printf 같은 가변인자를 가지는 함수때문에
@@ -178,9 +190,19 @@ class MPAvailable : public ModulePass {
   Value* instrumentWithByteSize(IRBuilder<>& B, Instruction* I,
                                 std::map<Value*, Value*>& valToVal);
   bool checkShouldBeWrapped(Function& F);
+  Value* splatGEP2(GetElementPtrInst* gep, std::map<Value*, Value*>& valToVal,
+                   IRBuilder<>& irb);
+
+ private:
+  std::set<StructType*> externStructs;
+  bool isExternStruct(Type* type);
+  void valuePrintGenerate(Value* val, IRBuilder<>& irb);
+
+  void runOnStructInstrument(Module& M);
 
   std::set<StructType*> globalSTs;
-
+  Value* splatGEP(GetElementPtrInst* gep, std::map<Value*, Value*>& valToVal,
+                  IRBuilder<>& irb);
   StructType* findStruct(StructType* st);
   inline void assertGEP(Value* newGEP) {
     // valuePrint(newGEP, "Assert GEP");

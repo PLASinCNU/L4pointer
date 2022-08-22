@@ -29,6 +29,9 @@ using namespace llvm;
 enum AllocationType { Malloc, Calloc, Realloc, Alloca, AllocaNone };
 enum Possibility { No, Yes, Maybe };
 
+void deleteFunction(Function *F);
+bool isFunctionPtrPtrTy(Type *type);
+void traceUses(Function *F);
 bool isHeapAllocation(CallSite &CS);
 bool isHeapAlloc(Instruction &I);
 bool isMalloc(Function *F);
