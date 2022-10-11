@@ -26,8 +26,20 @@
     if (ty *var = cast<ty>(_I))
 
 using namespace llvm;
-enum AllocationType { Malloc, Calloc, Realloc, Alloca, AllocaNone };
-enum Possibility { No, Yes, Maybe };
+enum AllocationType
+{
+  Malloc,
+  Calloc,
+  Realloc,
+  Alloca,
+  AllocaNone
+};
+enum Possibility
+{
+  No,
+  Yes,
+  Maybe
+};
 
 void deleteFunction(Function *F);
 bool isFunctionPtrPtrTy(Type *type);
@@ -44,6 +56,7 @@ bool isReallocWrapper(Function *F);
 bool isFreeWrapper(Function *F);
 bool isAllocationFunc(Function *F);
 bool isFreeFunc(Function *F);
+bool isUserAllocation(Function *F);
 bool isAllocation(Instruction *I);
 bool isStackValue(Instruction *I);
 Value *createMask(IRBuilder<> &irb, Value *size, LLVMContext &ctx);
@@ -61,7 +74,8 @@ bool isI128TypeEqual(Type *type1);
 bool isMalloc(Instruction *I);
 bool isRealloc(Instruction *I);
 Constant *createConstantMask(Value *size, LLVMContext &ctx);
-enum LibPtr {
+enum LibPtr
+{
   None,
   Ignore,
   CopyFromArg,
@@ -73,10 +87,12 @@ enum LibPtr {
 
 enum LibPtr getLibPtrType(Function *F, int *dat);
 
-inline Value *otherOperand(Instruction *I, Value *Op) {
+inline Value *otherOperand(Instruction *I, Value *Op)
+{
   assert(I->getNumOperands() == 2);
 
-  if (I->getOperand(0) == Op) return I->getOperand(1);
+  if (I->getOperand(0) == Op)
+    return I->getOperand(1);
 
   assert(I->getOperand(1) == Op);
   return I->getOperand(0);
@@ -93,19 +109,24 @@ Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
 Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
                               const DataLayout &DL);
 const SCEV *getGlobalSizeSCEV(GlobalVariable *GV, ScalarEvolution &SE);
-static bool instUsesInst(Instruction *I, Instruction *Needle) {
+static bool instUsesInst(Instruction *I, Instruction *Needle)
+{
   SmallVector<Instruction *, 8> Worklist;
   SmallPtrSet<Instruction *, 8> Visited;
   Worklist.push_back(I);
 
-  do {
+  do
+  {
     I = Worklist.pop_back_val();
 
-    if (I == Needle) return true;
+    if (I == Needle)
+      return true;
 
-    if (!Visited.insert(I).second) continue;
+    if (!Visited.insert(I).second)
+      continue;
 
-    for (Use &U : I->operands()) {
+    for (Use &U : I->operands())
+    {
       ifcast(Instruction, UI, U.get()) Worklist.push_back(UI);
     }
   } while (!Worklist.empty());
@@ -117,12 +138,14 @@ int getSizeArg(Instruction *I);
 int getSizeArg(Function *F);
 void collectPHIOrigins(PHINode *PN, std::vector<Value *> &Origins);
 
-inline llvm::IntegerType *getPtrIntTy(llvm::LLVMContext &C) {
+inline llvm::IntegerType *getPtrIntTy(llvm::LLVMContext &C)
+{
   return llvm::Type::getIntNTy(C, 64);
 }
 
 template <typename T = User>
-inline T *getSingleUser(Value *V) {
+inline T *getSingleUser(Value *V)
+{
   assert(V->getNumUses() == 1);
   return cast<T>(*V->user_begin());
 }
