@@ -54,11 +54,44 @@ bool isUsedFunctionPointer(Function *F)
   }
   return false;
 }
+
+bool isArgsFunction(Function* F){
+  if(F->getName()=="dealwithargs"){
+    return true;
+  }
+  if(F->getName() == "main"){
+    return true;
+  }
+  return false;
+}
+
 bool isUserAllocation(Function *F)
 {
   if (F->getName() == "localmalloc")
   {
     return true;
+  }
+
+  if (F->getName() == "default_bzalloc"){
+    return true;
+  }
+  return false;
+}
+bool isStringFunction(Function* F){
+  
+  for(Instruction & I : instructions(*F)){
+    if(ReturnInst* RI = dyn_cast<ReturnInst>(&I)){
+      Value* val = RI->getReturnValue();
+      if(val){
+        if(Constant* cons = dyn_cast<Constant>(val)){
+          if(cons->isNullValue()) return false;
+          if(cons->getType()->isIntegerTy()) return false;
+          if(cons->getType()->isPointerTy()) return true;
+        }
+        
+      }
+      else return false;
+    }
   }
   return false;
 }
@@ -155,6 +188,16 @@ static inline bool isInList(std::set<std::string> sset, Function *F)
 {
   return sset.count(F->getName().str()) > 0;
 }
+bool isPassFunction(Function* F){
+  if(F->getName() =="King") return true;
+  if(F->getName() =="Queen") return true;
+  if(F->getName() =="Rook") return true;
+  if(F->getName() =="Bishop") return true;
+  if(F->getName() =="Knight") return true;
+  if(F->getName() =="Pawn") return true;
+  if(F->getName() == "ErrorIt") return true;
+  return false;
+}
 
 bool isMalloc(Function *F) { return isInList(MallocFuncs, F); }
 
@@ -187,8 +230,9 @@ bool isAllocation(Instruction *I)
 
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
-    llvm::CallSite CS(I);
-    if (isHeapAllocation(CS))
+
+    CallInst *CS= dyn_cast<CallInst>(I);
+    if (isHeapAllocation(*CS))
     {
       return true;
     }
@@ -201,8 +245,9 @@ bool isHeapAlloc(Instruction &I)
 {
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
-    llvm::CallSite cs(&I);
-    return isHeapAllocation(cs);
+    
+    CallInst *cs= dyn_cast<CallInst>(&I);
+    return isHeapAllocation(*cs);
   }
   return false;
 }
@@ -224,7 +269,7 @@ bool isStackValue(Instruction *I)
   return false;
 }
 
-bool isHeapAllocation(CallSite &CS)
+bool isHeapAllocation(CallInst &CS)
 {
   Function *F = CS.getCalledFunction();
   if (!F || !F->hasName() || F->isIntrinsic())
@@ -314,14 +359,14 @@ Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
   case Malloc:
   case Realloc:
   {
-    CallSite CS(I);
-    return CS.getArgOperand(SizeArg);
+    CallInst *CS= dyn_cast<CallInst>(I);
+    return CS->getArgOperand(SizeArg);
   }
   case Calloc:
   {
-    CallSite CS(I);
-    Value *NumElements = CS.getArgOperand(0);
-    Value *ElementSize = CS.getArgOperand(1);
+    CallInst *CS= dyn_cast<CallInst>(I);
+    Value *NumElements = CS->getArgOperand(0);
+    Value *ElementSize = CS->getArgOperand(1);
     return B.CreateMul(NumElements, ElementSize);
   }
   case Alloca:
@@ -349,14 +394,14 @@ Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
   case Malloc:
   case Realloc:
   {
-    CallSite CS(I);
-    return CS.getArgOperand(SizeArg);
+CallInst *CS= dyn_cast<CallInst>(I);
+    return CS->getArgOperand(SizeArg);
   }
   case Calloc:
   {
-    CallSite CS(I);
-    Value *NumElements = CS.getArgOperand(0);
-    Value *ElementSize = CS.getArgOperand(1);
+    CallInst *CS= dyn_cast<CallInst>(I);
+    Value *NumElements = CS->getArgOperand(0);
+    Value *ElementSize = CS->getArgOperand(1);
     return B.CreateMul(NumElements, ElementSize);
   }
   case Alloca:
@@ -395,15 +440,15 @@ const SCEV *getSizeSCEV(Instruction *I, ScalarEvolution &SE)
       errs() << "error, size is -1\n";
       return nullptr;
     }
-    CallSite CS = CallSite(I);
-    Value *tempV = CS.getArgOperand(SizeArg);
+    CallInst *CS= dyn_cast<CallInst>(I);
+    Value *tempV = CS->getArgOperand(SizeArg);
     return SE.getSCEV(tempV);
   }
   case Calloc:
   {
-    CallSite CS(I);
-    Value *NumElements = CS.getArgOperand(0);
-    Value *ElementSize = CS.getArgOperand(1);
+    CallInst *CS= dyn_cast<CallInst>(I);
+    Value *NumElements = CS->getArgOperand(0);
+    Value *ElementSize = CS->getArgOperand(1);
     return SE.getMulExpr(SE.getSCEV(NumElements), SE.getSCEV(ElementSize),
                          SCEV::FlagNUW);
   }
@@ -433,8 +478,8 @@ AllocationType getCallType(Instruction *I)
 
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
-    llvm::CallSite CS(I);
-    Function *F = CS.getCalledFunction();
+    CallInst *CS= dyn_cast<CallInst>(I);
+    Function *F = CS->getCalledFunction();
 
     if (!F || !F->hasName() || F->isIntrinsic())
       return AllocationType::AllocaNone;
@@ -477,8 +522,8 @@ int getSizeArg(Instruction *I)
 {
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
-    llvm::CallSite CS(I);
-    Function *F = CS.getCalledFunction();
+    CallInst *CS= dyn_cast<CallInst>(I);
+    Function *F = CS->getCalledFunction();
     return getSizeArg(F);
   }
   return -1;

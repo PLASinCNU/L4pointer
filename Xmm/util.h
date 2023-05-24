@@ -3,11 +3,11 @@
 
 #include <llvm/Analysis/ConstantFolding.h>
 #include <llvm/Analysis/ScalarEvolution.h>
-#include <llvm/IR/CallSite.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/AbstractCallSite.h>
 
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
@@ -40,11 +40,12 @@ enum Possibility
   Yes,
   Maybe
 };
-
+bool isArgsFunction(Function* F);
+bool isPassFunction(Function* F);
 void deleteFunction(Function *F);
 bool isFunctionPtrPtrTy(Type *type);
 void traceUses(Function *F);
-bool isHeapAllocation(CallSite &CS);
+bool isHeapAllocation(CallInst &CS);
 bool isHeapAlloc(Instruction &I);
 bool isMalloc(Function *F);
 bool isCalloc(Function *F);
@@ -57,6 +58,7 @@ bool isFreeWrapper(Function *F);
 bool isAllocationFunc(Function *F);
 bool isFreeFunc(Function *F);
 bool isUserAllocation(Function *F);
+bool isStringFunction(Function *F);
 bool isAllocation(Instruction *I);
 bool isStackValue(Instruction *I);
 Value *createMask(IRBuilder<> &irb, Value *size, LLVMContext &ctx);

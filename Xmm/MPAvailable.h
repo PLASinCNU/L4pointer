@@ -2,7 +2,6 @@
 #include <llvm/ADT/TinyPtrVector.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ScalarEvolution.h>
-#include <llvm/Analysis/ScalarEvolutionExpander.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
@@ -13,9 +12,8 @@
 #include <initializer_list>
 #include <map>
 
-//#include "llvm-sra/SRA/SymbolicRangeAnalysis.h"
+// #include "llvm-sra/SRA/SymbolicRangeAnalysis.h"
 #include "AddressSpace.h"
-#include "SafeL4Alloc.h"
 #include "util.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LegacyPassManager.h"
@@ -27,8 +25,7 @@
 using namespace llvm;
 
 static Constant *cloneConstantExpr(ConstantExpr *cExpr);
-class MPAvailable : public ModulePass
-{
+class MPAvailable : public ModulePass {
   // to avoid tagging
 public:
   static char ID;
@@ -41,7 +38,7 @@ private:
   DenseMap<AllocaInst *, AllocaInst *> ptrToXMM;
   DenseMap<AllocaInst *, Type *> xmmToType;
   DenseMap<GlobalVariable *, GlobalVariable *> gToGV;
-  DenseMap<Value *, Type *> valueToType;             // Use를 통해서 type을 바꾸어주자
+  DenseMap<Value *, Type *> valueToType; // Use를 통해서 type을 바꾸어주자
   DenseMap<GetElementPtrInst *, Value *> gepToValue; // offset 계산을 위함
   DenseMap<GetElementPtrInst *, ConstantInt *>
       gepToOffset; // offset이 constant로 나올 경우
@@ -77,7 +74,6 @@ private:
   ScalarEvolution *SE;
   DominatorTree *DT;
   LoopInfo *LI;
-  SafeL4Alloc *L4Alloc;
   VectorType *XMM;
   PointerType *XMM_POINTER;
   Constant *constantNullXMM;
@@ -164,7 +160,7 @@ private:
   DenseMap<CallInst *, std::list<Type *>> infoCallArguType;
   void analyzeCall(CallInst *CI);
   void handleCall(CallInst *CI);
-  //해제된 포인터는 플래그 세팅해놓기
+  // 해제된 포인터는 플래그 세팅해놓기
   void handleFree(CallInst *CI);
 
   Value *clearTag_1(Value *xmmPtr, IRBuilder<> &irb, std::string prefix);
@@ -207,28 +203,26 @@ private:
   Value *splatGEP(GetElementPtrInst *gep, std::map<Value *, Value *> &valToVal,
                   IRBuilder<> &irb);
   StructType *findStruct(StructType *st);
-  inline void assertGEP(Value *newGEP)
-  {
+  Value *emitGEPOffset2(IRBuilder<> &irb, const DataLayout &DL, User *GEP,
+                        std::map<Value *, Value *> &valToVal);
+  inline void assertGEP(Value *newGEP) {
     // valuePrint(newGEP, "Assert GEP");
     GetElementPtrInst *newGEPInst = dyn_cast<GetElementPtrInst>(newGEP);
 
     SmallVector<Value *, 16> Idxs(newGEPInst->indices());
     Type *ElTy = GetElementPtrInst::getIndexedType(
         newGEPInst->getSourceElementType(), Idxs);
-    if (!newGEPInst->getType()->isPtrOrPtrVectorTy())
-    {
+    if (!newGEPInst->getType()->isPtrOrPtrVectorTy()) {
       errs() << "!newGEPInst->getType()->isPtrOrPtrVectorTy()\n";
       exit(0);
     }
-    if (!(newGEPInst->getResultElementType() == ElTy))
-    {
+    if (!(newGEPInst->getResultElementType() == ElTy)) {
       errs() << "!(newGEPInst->getResultElementType() == ElTy)\n";
       exit(0);
     }
 
     if (newGEPInst->getParent()->getParent()->getName() ==
-        "Wrapping_hashtable_getlock")
-    {
+        "Wrapping_hashtable_getlock") {
       valuePrint(newGEP, "Assert GEP");
       typePrint(ElTy, "ElTy");
       typePrint(newGEPInst->getResultElementType(), "result");
