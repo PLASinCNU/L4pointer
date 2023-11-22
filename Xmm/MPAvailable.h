@@ -24,7 +24,7 @@
 
 using namespace llvm;
 
-static Constant *cloneConstantExpr(ConstantExpr *cExpr);
+// static Constant *cloneConstantExpr(ConstantExpr *cExpr);
 class MPAvailable : public ModulePass {
   // to avoid tagging
 public:
@@ -82,7 +82,6 @@ private:
   Function *AddWithOverflowFunc;
   FunctionCallee printFunction;
 
-  void transformAlloc(Function &F);
   bool isXMMPtrTy(Type *type);
   void getAnalysisUsage(AnalysisUsage &AU) const override;
   void findDoublePtrMalloc(Function &F);
@@ -106,7 +105,7 @@ private:
   void createGlobalValue();
   void createWrappingFunction(Function &F);
   void declareWrappingFunction(Function &F);
-  void createWrappingMain(Function &F);
+
   Value *createL4Ptr(Value *ptr, IRBuilder<> &irb);
   Value *instrumentWithByteOfMalloc(IRBuilder<> &B, Instruction *I,
                                     std::map<Value *, Value *> &valToVal);
@@ -147,8 +146,6 @@ private:
                        bool needReplace = false);
   void transFormation(Function *F);
 
-  void transFunction(Module &M);
-  void transformFunction(Function *F);
 
   void replaceAll(Value *orig, Value *replacer);
 
@@ -192,13 +189,16 @@ private:
                    IRBuilder<> &irb);
 
 private:
+Value *cloneConstantExpr(ConstantExpr *cExpr, std::map<Value*, Value*> &valToVal);
   std::set<StructType *> externStructs;
   bool isExternStruct(Type *type);
-  void valuePrintGenerate(Value *val, IRBuilder<> &irb);
+  void valuePrintGenerate(Value *val, IRBuilder<> &irb, bool isPointer = false);
 
   void runOnStructInstrument(Module &M);
   void removeLiteralStruct(Module &M);
 
+  void removeConstantExpr(Module &M); // Load랑 store에 대해서만
+  void removeUserAlloc(Module &M); 
   std::set<StructType *> globalSTs;
   Value *splatGEP(GetElementPtrInst *gep, std::map<Value *, Value *> &valToVal,
                   IRBuilder<> &irb);

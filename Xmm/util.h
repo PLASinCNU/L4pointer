@@ -151,5 +151,5 @@ inline T *getSingleUser(Value *V)
   assert(V->getNumUses() == 1);
   return cast<T>(*V->user_begin());
 }
-
+Instruction *getAsInstruction(ConstantExpr* cExpr, Instruction *InsertBefore);
 #endif

@@ -55,11 +55,14 @@ bool isUsedFunctionPointer(Function *F)
   return false;
 }
 
-bool isArgsFunction(Function* F){
-  if(F->getName()=="dealwithargs"){
+bool isArgsFunction(Function *F)
+{
+  if (F->getName() == "dealwithargs")
+  {
     return true;
   }
-  if(F->getName() == "main"){
+  if (F->getName() == "main")
+  {
     return true;
   }
   return false;
@@ -72,25 +75,34 @@ bool isUserAllocation(Function *F)
     return true;
   }
 
-  if (F->getName() == "default_bzalloc"){
+  if (F->getName() == "default_bzalloc")
+  {
     return true;
   }
   return false;
 }
-bool isStringFunction(Function* F){
-  
-  for(Instruction & I : instructions(*F)){
-    if(ReturnInst* RI = dyn_cast<ReturnInst>(&I)){
-      Value* val = RI->getReturnValue();
-      if(val){
-        if(Constant* cons = dyn_cast<Constant>(val)){
-          if(cons->isNullValue()) return false;
-          if(cons->getType()->isIntegerTy()) return false;
-          if(cons->getType()->isPointerTy()) return true;
+bool isStringFunction(Function *F)
+{
+
+  for (Instruction &I : instructions(*F))
+  {
+    if (ReturnInst *RI = dyn_cast<ReturnInst>(&I))
+    {
+      Value *val = RI->getReturnValue();
+      if (val)
+      {
+        if (Constant *cons = dyn_cast<Constant>(val))
+        {
+          if (cons->isNullValue())
+            return false;
+          if (cons->getType()->isIntegerTy())
+            return false;
+          if (cons->getType()->isPointerTy())
+            return true;
         }
-        
       }
-      else return false;
+      else
+        return false;
     }
   }
   return false;
@@ -121,7 +133,6 @@ void deleteFunction(Function *F)
   {
     inst_iterator vI = I;
     I++;
-
     vI->replaceAllUsesWith(UndefValue::get(vI->getType()));
     vI->eraseFromParent();
   }
@@ -188,14 +199,22 @@ static inline bool isInList(std::set<std::string> sset, Function *F)
 {
   return sset.count(F->getName().str()) > 0;
 }
-bool isPassFunction(Function* F){
-  if(F->getName() =="King") return true;
-  if(F->getName() =="Queen") return true;
-  if(F->getName() =="Rook") return true;
-  if(F->getName() =="Bishop") return true;
-  if(F->getName() =="Knight") return true;
-  if(F->getName() =="Pawn") return true;
-  if(F->getName() == "ErrorIt") return true;
+bool isPassFunction(Function *F)
+{
+  if (F->getName() == "King")
+    return true;
+  if (F->getName() == "Queen")
+    return true;
+  if (F->getName() == "Rook")
+    return true;
+  if (F->getName() == "Bishop")
+    return true;
+  if (F->getName() == "Knight")
+    return true;
+  if (F->getName() == "Pawn")
+    return true;
+  if (F->getName() == "ErrorIt")
+    return true;
   return false;
 }
 
@@ -231,7 +250,7 @@ bool isAllocation(Instruction *I)
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
 
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     if (isHeapAllocation(*CS))
     {
       return true;
@@ -245,8 +264,8 @@ bool isHeapAlloc(Instruction &I)
 {
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
-    
-    CallInst *cs= dyn_cast<CallInst>(&I);
+
+    CallInst *cs = dyn_cast<CallInst>(&I);
     return isHeapAllocation(*cs);
   }
   return false;
@@ -359,12 +378,12 @@ Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
   case Malloc:
   case Realloc:
   {
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     return CS->getArgOperand(SizeArg);
   }
   case Calloc:
   {
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     Value *NumElements = CS->getArgOperand(0);
     Value *ElementSize = CS->getArgOperand(1);
     return B.CreateMul(NumElements, ElementSize);
@@ -394,12 +413,12 @@ Value *instrumentWithByteSize(IRBuilder<> &B, Instruction *I,
   case Malloc:
   case Realloc:
   {
-CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     return CS->getArgOperand(SizeArg);
   }
   case Calloc:
   {
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     Value *NumElements = CS->getArgOperand(0);
     Value *ElementSize = CS->getArgOperand(1);
     return B.CreateMul(NumElements, ElementSize);
@@ -440,13 +459,13 @@ const SCEV *getSizeSCEV(Instruction *I, ScalarEvolution &SE)
       errs() << "error, size is -1\n";
       return nullptr;
     }
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     Value *tempV = CS->getArgOperand(SizeArg);
     return SE.getSCEV(tempV);
   }
   case Calloc:
   {
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     Value *NumElements = CS->getArgOperand(0);
     Value *ElementSize = CS->getArgOperand(1);
     return SE.getMulExpr(SE.getSCEV(NumElements), SE.getSCEV(ElementSize),
@@ -478,7 +497,7 @@ AllocationType getCallType(Instruction *I)
 
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     Function *F = CS->getCalledFunction();
 
     if (!F || !F->hasName() || F->isIntrinsic())
@@ -522,7 +541,7 @@ int getSizeArg(Instruction *I)
 {
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
   {
-    CallInst *CS= dyn_cast<CallInst>(I);
+    CallInst *CS = dyn_cast<CallInst>(I);
     Function *F = CS->getCalledFunction();
     return getSizeArg(F);
   }
@@ -613,7 +632,7 @@ Value *createMask(IRBuilder<> &irb, Value *size, LLVMContext &ctx)
   {
     op = irb.CreateZExt(size, Type::getInt64Ty(ctx));
   }
-  valuePrint(op, "op");
+  // valuePrint(op, "op");
   Value *maskNoShift = irb.CreateSub(one, op, "sub");
   // valuePrint(maskNoShift, "mask");
   return maskNoShift;
@@ -716,7 +735,7 @@ void deleteFunctionInst(Function &F)
     {
       for (Value *use : v->users())
       {
-        valuePrint(use, "use");
+        // valuePrint(use, "use");
       }
       v->dropDroppableUses();
     }
@@ -725,7 +744,7 @@ void deleteFunctionInst(Function &F)
   }
   for (Instruction &I : instructions(F))
   {
-    instPrint(&I, "I");
+    // instPrint(&I, "I");
     I.eraseFromParent();
   }
 }
@@ -738,4 +757,54 @@ bool isI128TypeEqual(Type *type)
       return true;
   }
   return false;
+}
+
+Instruction *getAsInstruction(ConstantExpr* cExpr, Instruction *InsertBefore)
+{
+  SmallVector<Value *, 4> ValueOperands(cExpr->operands());
+  ArrayRef<Value *> Ops(ValueOperands);
+
+  switch (cExpr->getOpcode())
+  {
+  case Instruction::Trunc:
+  case Instruction::ZExt:
+  case Instruction::SExt:
+  case Instruction::FPTrunc:
+  case Instruction::FPExt:
+  case Instruction::UIToFP:
+  case Instruction::SIToFP:
+  case Instruction::FPToUI:
+  case Instruction::FPToSI:
+  case Instruction::PtrToInt:
+  case Instruction::IntToPtr:
+  case Instruction::BitCast:
+  case Instruction::AddrSpaceCast:
+    return CastInst::Create((Instruction::CastOps)cExpr->getOpcode(), Ops[0],
+                            cExpr->getType(), "", InsertBefore);
+  case Instruction::InsertElement:
+    return InsertElementInst::Create(Ops[0], Ops[1], Ops[2], "", InsertBefore);
+  case Instruction::ExtractElement:
+    return ExtractElementInst::Create(Ops[0], Ops[1], "", InsertBefore);
+  case Instruction::ShuffleVector:
+    return new ShuffleVectorInst(Ops[0], Ops[1], cExpr->getShuffleMask(), "",
+                                 InsertBefore);
+
+  case Instruction::GetElementPtr:
+  {
+    const auto *GO = cast<GEPOperator>(cExpr);
+    if (GO->isInBounds())
+      return GetElementPtrInst::CreateInBounds(
+          GO->getSourceElementType(), Ops[0], Ops.slice(1), "", InsertBefore);
+    return GetElementPtrInst::Create(GO->getSourceElementType(), Ops[0],
+                                     Ops.slice(1), "", InsertBefore);
+  }
+  case Instruction::ICmp:
+  case Instruction::FCmp:
+    return CmpInst::Create((Instruction::OtherOps)cExpr->getOpcode(),
+                           (CmpInst::Predicate)cExpr->getPredicate(), Ops[0], Ops[1],
+                           "", InsertBefore);
+  default:
+    errs() << "Error\n";
+    return nullptr;
+  }
 }
