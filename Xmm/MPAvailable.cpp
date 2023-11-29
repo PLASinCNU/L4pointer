@@ -1627,16 +1627,16 @@ void MPAvailable::createWrappingFunction(Function &F)
   //   return;
   // }
   // if(isPassFunction(&F)) return;
-  if (F.getName().find("_GLOBAL__") != std::string::npos)
-  {
-    funcToFunc[&F] = &F;
-    return;
-  }
-  if (F.getName().find("global") != std::string::npos)
-  {
-    funcToFunc[&F] = &F;
-    return;
-  }
+  // if (F.getName().find("_GLOBAL__") != std::string::npos)
+  // {
+  //   funcToFunc[&F] = &F;
+  //   return;
+  // }
+  // if (F.getName().find("global") != std::string::npos)
+  // {
+  //   funcToFunc[&F] = &F;
+  //   return;
+  // }
   if (isUserAllocation(&F))
     return;
   if (isStringFunction(&F))
@@ -3248,7 +3248,9 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
         AttributeList al = callee->getAttributes();
 
         CI->getAttributes();
-
+        std::vector<Type *> emptyTypes;
+        std::vector<Value *> emptyArgs;
+        Value* stacksave = irb.CreateIntrinsic(Intrinsic::stacksave, emptyTypes, emptyArgs);
         for (unsigned int i = 0; i < CI->arg_size(); i++)
         {
           AttributeSet attrs = al.getParamAttributes(i);
@@ -3293,6 +3295,7 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
             {
               Value *newArg = valToVal[arg];
               Value *tempArg = irb.CreateAlloca(XMM, nullptr, "temp.arg");
+              AllocaInst* AI = dyn_cast<AllocaInst>(tempArg);
               if (isXMMTy(newArg->getType()))
               {
                 irb.CreateStore(newArg, tempArg);
@@ -3360,17 +3363,9 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
             if (valToVal.count(arg) > 0)
             {
               plist.push_back(valToVal[arg]);
-              if(newCallee->getName().contains("bsW")){
-                //valuePrintGenerate(valToVal[arg], irb);
-              valuePrint(valToVal[arg], "arg"+i);
-              }
             }
             else
             {
-              if(newCallee->getName().contains("bsW")){
-              //valuePrintGenerate(arg, irb);
-              valuePrint(arg, "arg"+i);
-              }
               plist.push_back(arg);
               // 그냥 arg 넣어주기
               // 거의 왠만하면 constant 일듯
@@ -3380,6 +3375,11 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
 
         Value *newVal = irb.CreateCall(newCallee, plist, I.getName());
         CallInst *newCallInst = dyn_cast<CallInst>(newVal);
+        std::vector<Value*> stackrestoreParam;
+        std::vector<Type* > stackrestoreTypes;
+        stackrestoreParam.push_back(stacksave);
+        // stackrestoreTypes.push_back(stacksave->getType());
+        irb.CreateIntrinsic(Intrinsic::stackrestore, stackrestoreTypes, stackrestoreParam);
         AttributeList AL;
 
         // AttributeSet reAS = CI->getAttributes(AttributeList::ReturnIndex);
@@ -3425,6 +3425,7 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
           }
         }
         // newCallInst->setAttributes(AL);
+        
         valToVal[dyn_cast<Value>(&I)] = newVal;
       }
       else if (!callee->isDeclaration())
@@ -3771,11 +3772,11 @@ void MPAvailable::declareWrappingFunction(Function &F)
     funcToFunc[&F] = &F;
     return;
   }
-  if (F.getName().find("global") != std::string::npos)
-  {
-    funcToFunc[&F] = &F;
-    return;
-  }
+  // if (F.getName().find("global") != std::string::npos)
+  // {
+  //   funcToFunc[&F] = &F;
+  //   return;
+  // }
   if (isUserAllocation(&F) || isStringFunction(&F))
   {
     funcToFunc[&F] = &F;
