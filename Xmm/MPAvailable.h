@@ -83,14 +83,19 @@ private:
   FunctionCallee printFunction;
 
   bool isXMMPtrTy(Type *type);
+  void removeGlobalValue(Module& M);
   void getAnalysisUsage(AnalysisUsage &AU) const override;
   void findDoublePtrMalloc(Function &F);
   void createXmmStructTy(Module &M);
+  void checkConstValue(Module &M);
+  bool isGlobalConstant(Value* op);
   BasicBlock *cloneBB(Function *cloneFunc, BasicBlock *orig,
                       std::map<StringRef, int> &argToArg,
                       std::map<Value *, Value *> &valToVal,
                       std::map<Value *, Value *> &arrToPtr);
-
+  std::map<Value *, Value *> arrOfGlobalVal;
+  std::set<Value*> constVariables;
+  std::vector<GlobalVariable *> removeGlobals;
   void replaceStructTy(Module &M); //  이 함수에서는 그냥 struct 타입에
   // 대해서만 바꿔줌, 그리고 gep 쪼개기 void replaceStructTyInFunction(Function&
   // F ); //  이 함수에서는 그냥 struct 타입에 대해서만 바꿔줌, 그리고 gep
@@ -171,6 +176,7 @@ private:
   Value *ununTag(Value *xmmPtr, Type *origType, IRBuilder<> &irb,
                  DenseSet<Instruction *> &conList, std::string prefix = "");
   Value *createXmmTag(IRBuilder<> &irb, Value *size, std::string prefix);
+  Value *createXmmValue(IRBuilder<> &irb, Value *value);
 
   bool isXMMTy(Type *type);
   Value *createOffset(Value *index, Type *type, IRBuilder<> &irb);

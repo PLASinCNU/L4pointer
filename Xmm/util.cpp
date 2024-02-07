@@ -594,6 +594,18 @@ bool isRealloc(Instruction *I)
   return false;
 }
 
+bool isCalloc(Instruction *I){
+  if (!isAllocation(I))
+    return false;
+  if (CallInst *CI = dyn_cast<CallInst>(I))
+  {
+    Function *func = CI->getCalledFunction();
+    if (func->getName() == "calloc")
+      return true;
+  }
+  return false;
+}
+
 static void collectPHIOriginsRecursive(PHINode *PN,
                                        std::vector<Value *> &Origins,
                                        std::set<Value *> &Visited)
@@ -617,6 +629,10 @@ void collectPHIOrigins(PHINode *PN, std::vector<Value *> &Origins)
   collectPHIOriginsRecursive(PN, Origins, Visited);
 }
 
+Constant *createConstantMask(unsigned int size, LLVMContext & ctx){
+  Constant* mask = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL <<31) - size - 1);
+  return mask;
+}
 Value *createMask(IRBuilder<> &irb, Value *size, LLVMContext &ctx)
 {
   // 초기화 전용
@@ -640,7 +656,7 @@ Value *createMask(IRBuilder<> &irb, Value *size, LLVMContext &ctx)
 Constant *createConstantMask(Value *size, LLVMContext &ctx)
 {
   Constant *consSize = dyn_cast<Constant>(size);
-  ConstantInt *one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31));
+  ConstantInt *one = ConstantInt::get(Type::getInt64Ty(ctx), (1ULL << 31)-1);
   Constant *maskNoShift = ConstantExpr::getSub(one, consSize, "sub");
   return maskNoShift;
 }
@@ -756,6 +772,13 @@ bool isI128TypeEqual(Type *type)
     if (type->getIntegerBitWidth() == 128)
       return true;
   }
+  return false;
+}
+bool isDoublePtr(Type* type){
+  if(type->isPointerTy()){
+    PointerType* pType = dyn_cast<PointerType>(type);
+    if(pType->getPointerElementType()->isPointerTy()) return true;
+  } 
   return false;
 }
 

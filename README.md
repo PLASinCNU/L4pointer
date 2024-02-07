@@ -23,5 +23,9 @@ bzip, mcf, sjeong, specrand, ldm
 999.specrand 
 
 bzip :  ./out ../data/all/input/input.combined 200 > bzip2.ref.combined 2> bzip2.ref.combined.err
-
+mcf  : ./out ../data/train/input/inp.in > mcf.ref.out 2> mcf.ref.er
+sjeng: ./sjeng_base.wllvm ../data/ref/input/ref.txt
 sendMTFValues
+
+# To do list 
+# 

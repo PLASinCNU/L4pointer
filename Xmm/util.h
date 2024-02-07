@@ -74,7 +74,10 @@ bool isExternalStruct(std::string name);
 bool isFunctionPtrTy(Type *type);
 bool isI128TypeEqual(Type *type1);
 bool isMalloc(Instruction *I);
+bool isCalloc(Instruction *I);
 bool isRealloc(Instruction *I);
+bool isDoublePtr(Type* type);
+Constant *createConstantMask(unsigned int size, LLVMContext & ctx);
 Constant *createConstantMask(Value *size, LLVMContext &ctx);
 enum LibPtr
 {
