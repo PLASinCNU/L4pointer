@@ -489,7 +489,8 @@ bool MPAvailable::runOnModule(Module &M)
   runOnStructInstrument(M);
   createXmmStructTy(M);
   replaceStructTy(M);
-  //checkConstValue(M);
+  checkConstValue(M);
+  makeConstAliasList();
 
   for (auto &F : M)
   {
@@ -2063,15 +2064,15 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
               ArrayType::get(XMM, AT->getArrayNumElements());
 
           newArray =
+              irb.CreateAlloca(newArrayType, nullptr, allocaInst->getName());
+          if (constVariables.count(allocaInst) > 0)
+          {
+            newArray = irb.CreateAlloca(allocaInst->getAllocatedType(), nullptr,
+                                        allocaInst->getName());
+          }
+          else
+            newArray =
                 irb.CreateAlloca(newArrayType, nullptr, allocaInst->getName());
-          // if (constVariables.count(allocaInst) > 0)
-          // {
-          //   newArray = irb.CreateAlloca(allocaInst->getAllocatedType(), nullptr,
-          //                               allocaInst->getName());
-          // }
-          // else
-          //   newArray =
-          //       irb.CreateAlloca(newArrayType, nullptr, allocaInst->getName());
         }
         else
           newArray = irb.CreateAlloca(allocaInst->getAllocatedType(), nullptr,
@@ -2490,15 +2491,25 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
         if (isXMMTy(pointer->getType()))
         {
           // 여기서 포인터의 포인터일경우 에는 다르게 해야함
+
           Type *loadType = origPointer->getType();
           Value *clearTagPointer;
           if (I.getType()->isPointerTy() && !isFunctionPtrTy(I.getType()))
           {
-            clearTagPointer =
-                ununTag(pointer, XMM_POINTER, irb,
-                        origPointer->hasName()
-                            ? origPointer->getName().str() + "XMM_POINTER_GET"
-                            : "XMM_POINTER_GET");
+            if (constAliases.count(dyn_cast<Instruction>(I.getOperand(0))))
+            {
+              clearTagPointer =
+                  ununTag(pointer, I.getOperand(0)->getType(), irb,
+                          origPointer->hasName()
+                              ? origPointer->getName().str() + "CONST"
+                              : "CONST");
+            }
+            else
+              clearTagPointer =
+                  ununTag(pointer, XMM_POINTER, irb,
+                          origPointer->hasName()
+                              ? origPointer->getName().str() + "XMM_POINTER_GET"
+                              : "XMM_POINTER_GET");
             // clearTagPointer = ununTag(
             //     pointer, loadType, irb,
             //     origPointer->hasName() ? origPointer->getName().str() :
@@ -2699,7 +2710,15 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
               Value *offset = emitGEPOffset(irb, *DL, gep, valToVal);
 
               if (at->getArrayElementType()->isPointerTy())
-                offset = irb.CreateMul(offset, ConstantInt::get(irb.getInt64Ty(), 2), "twox.offset");
+              {
+                //함수 포인터 배열도 안 되게 해야함 
+                if (constAliases.count(&I) > 0)
+                  offset = offset;
+                else if (isFunctionPtrTy(at->getArrayElementType()))
+                  offset = offset;
+                else
+                  offset = irb.CreateMul(offset, ConstantInt::get(irb.getInt64Ty(), 2), "twox.offset");
+              }
               // 더블 포인터면 두배가 되게 해주고
               // 스트럭트 타입이면 바꿔주고 해야함 -->struct type은 emitGEPOffset에서 해주고 있음
               Constant *nullVec = Constant::getNullValue(XMM);
@@ -2751,10 +2770,17 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
 
             Value *offset = emitGEPOffset(irb, *DL, gep, valToVal);
             PointerType *pt = dyn_cast<PointerType>(I.getType());
-
+            ArrayType* at = dyn_cast<ArrayType>(pt->getElementType());
             if (pt->getElementType()->isPointerTy())
-              offset = irb.CreateMul(offset, ConstantInt::get(irb.getInt64Ty(), 2), "twox.offset");
-
+            {
+              // 함수 포인터 배열도 안되게 해야함 
+              if (constAliases.count(&I) > 0)
+                offset = offset;
+              else if (isFunctionPtrPtrTy(pt))
+                  offset = offset;
+              else
+                offset = irb.CreateMul(offset, ConstantInt::get(irb.getInt64Ty(), 2), "twox.offset");
+            }
             Constant *nullVec = Constant::getNullValue(XMM);
             Value *tag = createOffsetMask(irb, offset);
             Value *v0 = irb.CreateInsertElement(nullVec, tag, (uint64_t)0);
@@ -5145,13 +5171,13 @@ bool MPAvailable::isGlobalConstant(Value *op)
   if (ConstantExpr *cExpr = dyn_cast<ConstantExpr>(op))
   {
     Value *pointer;
-    if (GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(cExpr->getAsInstruction()))
+    if (cExpr->getOpcode() == Instruction::GetElementPtr)
     {
-      pointer = gep->getPointerOperand();
+      pointer = cExpr->getOperand(0);
     }
-    else if (BitCastInst *bci = dyn_cast<BitCastInst>(cExpr->getAsInstruction()))
+    else if (cExpr->getOpcode() == Instruction::BitCast)
     {
-      pointer = bci->getOperand(0);
+      pointer = cExpr->getOperand(0);
     }
     else
       return false;
@@ -5222,14 +5248,32 @@ void MPAvailable::checkConstValue(Module &M)
           }
           if (storeCount == 1 && isConst)
           {
-            instPrint(&I, "const value");
-            constVariables.insert(&I);
+            ArrayType *allocType = dyn_cast<ArrayType>(AI->getAllocatedType());
+            if (allocType->getArrayElementType()->isPointerTy())
+            {
+              instPrint(&I, "const value");
+              constVariables.insert(&I);
+            }
           }
         }
         break;
       }
       default:
         break;
+      }
+    }
+  }
+}
+void MPAvailable::makeConstAliasList()
+{
+  for (Value *val : constVariables)
+  {
+    for (User *use : val->users())
+    {
+      if (Instruction *inst = dyn_cast<Instruction>(use))
+      {
+        instPrint(inst, "const alias");
+        constAliases.insert(inst);
       }
     }
   }

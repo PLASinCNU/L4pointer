@@ -89,6 +89,8 @@ private:
   void createXmmStructTy(Module &M);
   void checkConstValue(Module &M);
   bool isGlobalConstant(Value* op);
+  void makeConstAliasList();
+  std::set<Instruction*> constAliases;
   BasicBlock *cloneBB(Function *cloneFunc, BasicBlock *orig,
                       std::map<StringRef, int> &argToArg,
                       std::map<Value *, Value *> &valToVal,
