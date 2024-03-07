@@ -274,7 +274,7 @@ void MPAvailable::createGlobalValue()
           gvar_ptr_array->setInitializer(caz);
           unsigned int typeSize = DL->getTypeAllocSize(newAtype);
           // Constant *size = ConstantInt::getIntegerValue(Type::getInt64Ty(aType->getContext()), APInt(64, typeSize * 2));
-          Constant *Ovsz = createConstantMask(typeSize, aType->getContext());
+          Constant *Ovsz = createConstantMask(typeSize*2, aType->getContext());
 
           Constant *emptyVec = Constant::getNullValue(XMM);
           Constant *PtrInt = ConstantExpr::getPtrToInt(gvar_ptr_array, IntegerType::getInt64Ty(XMM->getContext()));
@@ -343,8 +343,8 @@ void MPAvailable::createGlobalValue()
               newFunc = funcToFunc[func];
               Constant *cons = dyn_cast<Constant>(newFunc);
               plist.push_back(cons);
-              errs() << newFunc->getName() << "\n";
-              // ConstantArray::get(newAtype, plist);
+              // errs() << newFunc->getName() << "\n";
+              //  ConstantArray::get(newAtype, plist);
             }
 
             newAtype = ArrayType::get(newFunc->getFunctionType()->getPointerTo(), aType->getArrayNumElements());
@@ -799,7 +799,12 @@ Value *MPAvailable::emitGEPOffset(IRBuilder<> &irb, const DataLayout &DL,
       // assert(isa<Constant>(Val) && "Val must be constant!");
       Op = Val;
     }
-    uint64_t Size = DL.getTypeAllocSize(GTI.getIndexedType());
+    Type* typeSize = GTI.getIndexedType();
+    if(typeSize->isStructTy()){
+      StructType* st = dyn_cast<StructType>(typeSize);
+      if(strucTyToStructTy.count(st)> 0 ) typeSize = strucTyToStructTy[st];
+    }
+    uint64_t Size = DL.getTypeAllocSize(typeSize);
     Value *Offset;
     if (Constant *OpC = dyn_cast<Constant>(Op))
     {
@@ -1996,10 +2001,11 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
     {
       // PASS
       AllocaInst *allocaInst = dyn_cast<AllocaInst>(&I);
-      if (allocaInst->getName() == "argv.addr" || isArgsFunction(cloneFunc))
+      if (allocaInst->getName() == "argv.addr" && isArgsFunction(cloneFunc))
       {
         Instruction *newInst = I.clone();
         newInst->setName(I.getName());
+        instPrint(newInst, "new alloc ");
         valToVal[dyn_cast<Value>(&I)] = dyn_cast<Value>(newInst);
         clone->getInstList().push_back(newInst);
         break;
@@ -2169,12 +2175,13 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
           }
           if (AllocaInst *newAI = dyn_cast<AllocaInst>(I.getOperand(1)))
           {
-            if (cloneFunc->getName() != "main")
+            if (!isArgsFunction(I.getFunction()))
             {
               Value *tag = cloneFunc->getArg(index);
 
               Value *bitcast = irb.CreateBitCast(tag, XMM_POINTER);
               Value *loadArg = irb.CreateLoad(bitcast);
+              valuePrint(v1, "v1");
               irb.CreateStore(loadArg, v1);
             }
             else
@@ -2711,7 +2718,7 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
 
               if (at->getArrayElementType()->isPointerTy())
               {
-                //함수 포인터 배열도 안 되게 해야함 
+                // 함수 포인터 배열도 안 되게 해야함
                 if (constAliases.count(&I) > 0)
                   offset = offset;
                 else if (isFunctionPtrTy(at->getArrayElementType()))
@@ -2765,19 +2772,19 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
           if (arrToPtr.count(base))
           {
             Value *wrapPtr = arrToPtr[base];
-            Value *l4Ptr = irb.CreateLoad(wrapPtr);
+            Value *l4Ptr = irb.CreateLoad(wrapPtr, "array.load");
             // Value *unWrapPtr = ununTag(l4Ptr, base->getType(), irb);
 
             Value *offset = emitGEPOffset(irb, *DL, gep, valToVal);
             PointerType *pt = dyn_cast<PointerType>(I.getType());
-            ArrayType* at = dyn_cast<ArrayType>(pt->getElementType());
+            ArrayType *at = dyn_cast<ArrayType>(pt->getElementType());
             if (pt->getElementType()->isPointerTy())
             {
-              // 함수 포인터 배열도 안되게 해야함 
+              // 함수 포인터 배열도 안되게 해야함
               if (constAliases.count(&I) > 0)
                 offset = offset;
               else if (isFunctionPtrPtrTy(pt))
-                  offset = offset;
+                offset = offset;
               else
                 offset = irb.CreateMul(offset, ConstantInt::get(irb.getInt64Ty(), 2), "twox.offset");
             }
@@ -3473,6 +3480,7 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
           }
         }
         valToVal[dyn_cast<Value>(&I)] = cloneI;
+        break;
       }
       if (funcToFunc.count(callee) > 0)
       {
@@ -3486,8 +3494,17 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
             Value *newParam = valToVal.count(CI->getArgOperand(i)) > 0
                                   ? valToVal[CI->getArgOperand(i)]
                                   : CI->getArgOperand(i);
+            valuePrint(newParam, "newParam");
+            if(Instruction* inst = dyn_cast<Instruction>(newParam)){
+              valuePrint( valToVal[inst->getOperand(0)], "test");
+              errs()<<inst->getFunction()->getName() <<"\n";
+            }
+
             plist.push_back(newParam);
           }
+          errs() <<callee->getName() <<"\n";
+          typePrint(callee->getFunctionType(), "orig");
+          typePrint(newCallee->getFunctionType(), "function type");
           Value *newCall = irb.CreateCall(newCallee, plist);
           valToVal[&I] = newCall;
           break;
@@ -3498,15 +3515,26 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
         CI->getAttributes();
         std::vector<Type *> emptyTypes;
         std::vector<Value *> emptyArgs;
+        // STACK SAVE VERSION
         Value *stacksave = irb.CreateIntrinsic(Intrinsic::stacksave, emptyTypes, emptyArgs);
         for (unsigned int i = 0; i < CI->arg_size(); i++)
         {
           AttributeSet attrs = al.getParamAttributes(i);
           // if the function has variable arguments, the problem occur.
           // 내일 여기부터 해결하자
-
-          Value *funcArg = newCallee->getArg(i);
+          Value *funcArg;
           Value *arg = CI->getArgOperand(i);
+          // Var Arg Function doesn't have arg. I don't know.
+          // typePrint(newCallee->getFunctionType(), "function type");
+          if (newCallee->isVarArg())
+          {
+            //newCallee->var
+            funcArg = newCallee->getArg(0);
+          }
+          else
+          {
+            funcArg = newCallee->getArg(i);
+          }
 
           if (attrs.getAsString().find("byval") != std::string::npos)
           {
@@ -3584,7 +3612,8 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
               {
                 Instruction *newInst = I.clone();
                 clone->getInstList().push_back(newInst);
-
+                instPrint(&I, "I");
+                valuePrint(arg, "arg");
                 newArg = irb.CreatePtrToInt(newInst, irb.getInt64Ty());
                 // 일단 가변변수를 가진 함수에서 문제가 발생함
                 // 가변 변수를 가진 함수들이 호출하는 callee 들도 하지 않을것인지...
@@ -3625,6 +3654,7 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
         CallInst *newCallInst = dyn_cast<CallInst>(newVal);
         std::vector<Value *> stackrestoreParam;
         std::vector<Type *> stackrestoreTypes;
+        // STACK SAVE VERSION
         stackrestoreParam.push_back(stacksave);
         // stackrestoreTypes.push_back(stacksave->getType());
         irb.CreateIntrinsic(Intrinsic::stackrestore, stackrestoreTypes, stackrestoreParam);
@@ -3748,7 +3778,7 @@ BasicBlock *MPAvailable::cloneBB(Function *cloneFunc, BasicBlock *orig,
         Value *newOp = valToVal.count(I.getOperand(0)) > 0 ? valToVal[I.getOperand(0)] : I.getOperand(0);
         Value *newVal = irb.CreateLoad(newOp);
         valToVal[dyn_cast<Value>(&I)] = newVal;
-        valuePrint(newVal, "newVal");
+        // valuePrint(newVal, "newVal");
         break;
       }
       if (valToVal.count(I.getOperand(0)) > 0)
@@ -4106,7 +4136,9 @@ void MPAvailable::declareWrappingFunction(Function &F)
   }
   else
   {
+    //   errs() <<"F" <<F.getName() <<"\n";
     returnType = F.getReturnType();
+    // typePrint(returnType, "return type");
     if (returnType->isStructTy())
     {
       StructType *st = dyn_cast<StructType>(returnType);
@@ -4114,8 +4146,11 @@ void MPAvailable::declareWrappingFunction(Function &F)
       {
         st = findStruct(st);
       }
+      // typePrint(st, "st change");
+
       returnType =
-          strucTyToStructTy.count(st) > 0 ? strucTyToStructTy[st] : returnType;
+          strucTyToStructTy.count(st) > 0 ? strucTyToStructTy[st] : st;
+      // typePrint(returnType, "return change");
     }
   }
   // typePrint(F.getFunctionType(), F.getName().str());
@@ -4447,6 +4482,8 @@ void MPAvailable::runOnStructInstrument(Module &M)
   for (StructType *st : M.getIdentifiedStructTypes())
   {
     if (st->getName().find("anon") != StringRef::npos)
+      externStructs.insert(st);
+    if(st->getName().find("va_list") != StringRef::npos)
       externStructs.insert(st);
   }
   for (Function &F : M)
@@ -5018,7 +5055,20 @@ void MPAvailable::valuePrintGenerate(Value *val, IRBuilder<> &irb, bool isPointe
 Type *MPAvailable::createNewPointerType(Type *type)
 {
   if (!type->isPointerTy())
+  {
+    if (StructType *st = dyn_cast<StructType>(type))
+    {
+      if (st->isLiteral())
+      {
+        st = findStruct(st);
+      }
+      Type *newType = strucTyToStructTy.count(st) > 0
+                          ? strucTyToStructTy[st]
+                          : st;
+      return st;
+    }
     return type;
+  }
   PointerType *ptype = dyn_cast<PointerType>(type);
   Type *elementType = ptype->getPointerElementType();
 
@@ -5031,6 +5081,10 @@ Type *MPAvailable::createNewPointerType(Type *type)
     if (elementType->isStructTy())
     {
       StructType *st = dyn_cast<StructType>(elementType);
+      if (st->isLiteral())
+      {
+        st = findStruct(st);
+      }
       Type *newType = strucTyToStructTy.count(st) > 0
                           ? strucTyToStructTy[st]->getPointerTo()
                           : elementType->getPointerTo();
@@ -5047,7 +5101,7 @@ StructType *MPAvailable::findStruct(StructType *st)
   for (StructType *mSt : module->getIdentifiedStructTypes())
   {
     if (mSt->isOpaque() || mSt->isLiteral())
-      return st;
+      continue;
     if (mSt->isLayoutIdentical(st))
       return mSt;
   }
@@ -5072,12 +5126,14 @@ void MPAvailable::removeConstantExpr(Module &M)
           {
 
             // instPrint(&I, "orig");
-
+            // cExpr->getAsInstruction()
             Instruction *newInst = getAsInstruction(cExpr, &I);
-            //      instPrint(newInst, "newInst");
+            // cExpr->print(errs());
+            // errs() << " \n";
+            // instPrint(newInst, "newInst");
             I.setOperand(i, newInst);
             destroySet.insert(cExpr);
-            //    instPrint(&I, "set operand");
+            // instPrint(&I, "set operand");
           }
         }
         break;
@@ -5088,7 +5144,8 @@ void MPAvailable::removeConstantExpr(Module &M)
   }
   for (ConstantExpr *cExpr : destroySet)
   {
-    cExpr->destroyConstant();
+    if (cExpr->getNumUses() == 0)
+      cExpr->destroyConstant();
   }
 }
 
@@ -5251,7 +5308,7 @@ void MPAvailable::checkConstValue(Module &M)
             ArrayType *allocType = dyn_cast<ArrayType>(AI->getAllocatedType());
             if (allocType->getArrayElementType()->isPointerTy())
             {
-              instPrint(&I, "const value");
+              // instPrint(&I, "const value");
               constVariables.insert(&I);
             }
           }
@@ -5272,7 +5329,7 @@ void MPAvailable::makeConstAliasList()
     {
       if (Instruction *inst = dyn_cast<Instruction>(use))
       {
-        instPrint(inst, "const alias");
+        // instPrint(inst, "const alias");
         constAliases.insert(inst);
       }
     }

@@ -35,11 +35,14 @@ static std::set<std::string> ExternStruct = {"struct._IO_FILE",
                                              "struct.anon",
                                              "thread_args",
                                              "struct.stat",
-                                             "struct.stats_t"};
+                                             "struct.stats_t",
+                                             "__va_list_tag"};
 
 bool isExternalStruct(std::string name) { return ExternStruct.count(name) > 0; }
 bool isUsedFunctionPointer(Function *F)
 {
+  // 메인과 같이 User가 없는 함수는 need transform 이 false가 됨 
+  if(isArgsFunction(F)) return false; 
   for (Value *val : F->users())
   {
     if (CallInst *CI = dyn_cast<CallInst>(val))
@@ -57,6 +60,8 @@ bool isUsedFunctionPointer(Function *F)
 
 bool isArgsFunction(Function *F)
 {
+  if (F->getName().find("hmmcalibrate") != StringRef::npos) return true; 
+  if (F->getName().find("Plan7ComlogAppend") != StringRef::npos) return true; 
   if (F->getName() == "dealwithargs")
   {
     return true;
@@ -65,6 +70,10 @@ bool isArgsFunction(Function *F)
   {
     return true;
   }
+  if(F->getName() == "willbedeletemain")
+    return true;
+  if (F->getName() == "initialize_machine")
+    return true;
   return false;
 }
 
