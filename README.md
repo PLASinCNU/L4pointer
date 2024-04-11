@@ -16,7 +16,7 @@ bzip, mcf, sjeong, specrand, ldm
 456.hmmer - FRAMER
 458.sjeng O - FRAMER - L4
 462.libquantum O 
-464.h264ref 
+464.h264ref --> 에러 고처서 llvm commit 도전해보기 
 470.lbm
 482.sphinx3
 998.specrand O - L4
@@ -36,3 +36,5 @@ $gdb lli
 (gdb) run
 # To do list 
 # 
+
+BitcodeReader 가 Opaque pointer 를 못읽음
