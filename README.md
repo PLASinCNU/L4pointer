@@ -1,7 +1,7 @@
 # L4 Pointer
 
-opt -load=/home/mok/project/L4pointer/build/lib/libEpsilon.so -mpav -enable-new-pm=0 INPUT.bc -o out.bc
 
+opt -load=/home/mok/project/L4pointer/build/lib/libEpsilon.so -mpav -enable-new-pm=0 INPUT.bc -o out.bc
 ./runspec --config=wllvm.cfg --action=build --tune=base mcf
 
 bzip, mcf, sjeong, specrand, ldm
@@ -36,5 +36,13 @@ $gdb lli
 (gdb) run
 # To do list 
 # 
+
+bzip2 
+  out: 183.66seconds, maximum resident set size 626372(kbytes), 
+  base: 81.62seconds, maximum resident set size 626284(kbytes), 
+
+mcf
+
+
 
 BitcodeReader 가 Opaque pointer 를 못읽음
